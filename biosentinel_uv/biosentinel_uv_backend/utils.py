@@ -38,9 +38,7 @@ def descargar_imagen_desde_geojson(geojson_obj, output_dir="downloaded_images"):
     init_earth_engine()
 
     geometry = extract_geometry(geojson_obj)
-    print("geometry:",geometry)
     aoi = ee.Geometry(geometry)
-    print("aoi:",aoi)
 
     # Configuración
     params = {
@@ -61,7 +59,7 @@ def descargar_imagen_desde_geojson(geojson_obj, output_dir="downloaded_images"):
         ee.ImageCollection(params["satellite_collection"])
         .filterBounds(aoi)
         .filterDate(*params["date_range"])
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
     )
 
     mosaic = collection.mosaic()
@@ -147,7 +145,7 @@ def segmentar_con_segformer_b0(image_path):
     # 💾 Guardar imagen segmentada
     output_dir = "/tmp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
-    output_filename = f"segmentacion_{uuid.uuid4().hex[:8]}.png"
+    output_filename = f"segmentacion_{uuid.uuid4().hex[:8]}.tif"
     output_path = os.path.join(output_dir, output_filename)
     rgb_image.save(output_path)
 
