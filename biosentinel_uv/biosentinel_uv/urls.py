@@ -16,7 +16,12 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from biosentinel_uv_backend import views
 
 urlpatterns = [
+    # Administrador de Django
     path('admin/', admin.site.urls),
+    # Ruta para generar reportes con el LLM
+    path('generate_env_report/',
+            views.generar_informe_ambiental, name="generar_informe_ambiental"),
 ]
