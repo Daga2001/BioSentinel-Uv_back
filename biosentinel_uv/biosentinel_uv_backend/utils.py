@@ -39,7 +39,7 @@ def extract_geometry(geojson_obj):
         raise ValueError("❌ Estructura GeoJSON no reconocida.")
 
 # === Descarga imagen satelital en base a un GeoJSON ===
-def descargar_imagen_desde_geojson(geojson_obj, res, output_dir="downloaded_images"):
+def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir="downloaded_images"):
     init_earth_engine()
 
     geometry = extract_geometry(geojson_obj)
@@ -48,14 +48,27 @@ def descargar_imagen_desde_geojson(geojson_obj, res, output_dir="downloaded_imag
     # Configuración
     end_date = datetime.today().date()
     start_date = end_date - timedelta(days=30*12) # 12 meses atrás
+
+    # Sentinel-2 band names (L2A)
+    all_bands = [
+        "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A",
+        "B9", "B10", "B11", "B12"
+    ]
+
+    # If model is k-means or mkanet, select all bands
+    if model_name in ["k-means", "mkanet"]:
+        bands_to_use = all_bands
+    else:
+        bands_to_use = ["B4", "B3", "B2"]  # RGB
+
     params = {
         "satellite_collection": "COPERNICUS/S2_SR_HARMONIZED",
         "satellite_name": "SENTINEL-2",
         "date_range": (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
         "scale": res,
         "image_format": "tif",
-        "bands": None,  # por defecto usa RGB
-        "file_per_band": False
+        "bands": bands_to_use,
+        "file_per_band": model_name in ["k-means", "mkanet"]
     }
 
     # Borrar archivos previos
@@ -73,24 +86,40 @@ def descargar_imagen_desde_geojson(geojson_obj, res, output_dir="downloaded_imag
     )
 
     mosaic = collection.mosaic()
-    bands = params["bands"] if params["bands"] else ["B4", "B3", "B2"]
-    mosaic = mosaic.select(bands).visualize(min=0, max=3000, bands=bands)
+    mosaic = mosaic.select(bands_to_use)
 
-    # Obtener fecha de referencia
-    image_date = ee.Date(collection.first().get("system:time_start")).format("YYYY-MM-dd").getInfo()
-    band_suffix = "custom" if params["bands"] else "RGB"
-    filename = f"{image_date}_{params['satellite_name']}_mosaic_{band_suffix}.{params['image_format']}"
-    output_path = os.path.join(output_dir, filename)
-
-    geemap.ee_export_image(
-        ee_object=mosaic,
-        filename=output_path,
-        scale=params["scale"],
-        region=aoi,
-        file_per_band=params["file_per_band"],
-    )
-
-    return output_path
+    # Exportar imágenes
+    if params["file_per_band"]:
+        # Exportar cada banda como archivo .tif separado
+        band_paths = []
+        for band in bands_to_use:
+            band_img = mosaic.select([band])
+            filename = f"{band}_{params['satellite_name']}_mosaic_{band}.{params['image_format']}"
+            output_path = os.path.join(output_dir, filename)
+            geemap.ee_export_image(
+                ee_object=band_img,
+                filename=output_path,
+                scale=params["scale"],
+                region=aoi,
+                file_per_band=False,
+            )
+            band_paths.append(output_path)
+        return band_paths  # Devuelve lista de archivos por banda
+    else:
+        # Exportar imagen RGB combinada
+        mosaic = mosaic.visualize(min=0, max=3000, bands=bands_to_use)
+        image_date = ee.Date(collection.first().get("system:time_start")).format("YYYY-MM-dd").getInfo()
+        band_suffix = "custom" if params["bands"] else "RGB"
+        filename = f"{image_date}_{params['satellite_name']}_mosaic_{band_suffix}.{params['image_format']}"
+        output_path = os.path.join(output_dir, filename)
+        geemap.ee_export_image(
+            ee_object=mosaic,
+            filename=output_path,
+            scale=params["scale"],
+            region=aoi,
+            file_per_band=False,
+        )
+        return output_path
 
 # Carga global (opcional para eficiencia)
 model_id = "nvidia/segformer-b0-finetuned-ade-512-512"

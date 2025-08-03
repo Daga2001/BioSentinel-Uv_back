@@ -125,7 +125,7 @@ def generar_segmentacion(request):
 
     # Intenta descargar la imagen desde el geojson de la solicitud
     try:
-        image_path = utils.descargar_imagen_desde_geojson(geojson, res)
+        image_path = utils.descargar_imagen_desde_geojson(geojson, res, modelo)
     except Exception as e:
         return Response({
             "success": False,
