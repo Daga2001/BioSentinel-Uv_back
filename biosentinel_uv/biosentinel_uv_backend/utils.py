@@ -6,11 +6,16 @@ from datetime import datetime, timedelta
 import base64
 import numpy as np
 import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
 import os
 import io
 import uuid
+import rasterio
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
 
 # === Inicializa Earth Engine (solo una vez) ===
 def init_earth_engine():
@@ -116,6 +121,10 @@ def closest_css3_color_name(rgb_val):
             closest_name = name
     return closest_name
 
+# =========================================================
+# ===== Segmentación con Segformer-B0 =====
+# =========================================================
+
 def segmentar_con_segformer_b0(image_path):
     # 📥 Cargar imagen
     img = Image.open(image_path).convert("RGB")
@@ -169,6 +178,10 @@ def segmentar_con_segformer_b0(image_path):
 from huggingface_hub import hf_hub_download
 from segment_anything import sam_model_registry, SamPredictor
 from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+
+# =========================================================
+# ===== Segmentación con CLIPSeg y SAM =====
+# =========================================================
 
 def segmentar_con_clipseg_sam(image_path):
     # Descargar checkpoint SAM si no existe
@@ -235,6 +248,171 @@ def segmentar_con_clipseg_sam(image_path):
             "name": concept,
             "color": hex_color,
             "count": results[concept]["pixels"]
+        }
+
+    return {
+        "classifications": pixels_per_class,
+        "image_path": output_path
+    }
+
+# =========================================================
+# ==== Segmentación con K-means en imágenes multibanda ====
+# =========================================================
+
+def segmentar_con_kmeans(image_path, k=6):
+    # Leer el archivo TIFF multibanda
+    with rasterio.open(image_path) as src:
+        stack = src.read()  # shape: (bands, rows, cols)
+    n_bands, h, w = stack.shape
+
+    # Reorganizar para clustering: (n_pixels, n_bands)
+    X = stack.reshape(n_bands, -1).T  # shape: (n_pixels, n_bands)
+
+    # Clustering K-means
+    kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
+    labels = kmeans.labels_.reshape(h, w)
+
+    # Paleta de colores para cada clase
+    np.random.seed(42)
+    palette = {i: tuple(np.random.randint(0, 255, 3)) for i in range(k)}
+
+    # Crear imagen RGB normalizada (usando bandas Sentinel-2 B04, B03, B02 si existen)
+    def normalize_band(band):
+        band_min, band_max = np.percentile(band, (2, 98))
+        band_norm = np.clip((band - band_min) / (band_max - band_min), 0, 1)
+        return (band_norm * 255).astype(np.uint8)
+
+    # Selección de bandas (B04, B03, B02) si existen
+    rgb_indices = [3, 2, 1] if n_bands >= 4 else [0, 0, 0]
+    rgb = np.stack([normalize_band(stack[i]) for i in rgb_indices], axis=-1)
+
+    # Crear imagen de clases
+    rgb_classes = np.zeros((h, w, 3), dtype=np.uint8)
+    for class_id, color in palette.items():
+        rgb_classes[labels == class_id] = color
+    rgb_image = Image.fromarray(rgb_classes)
+
+    # Guardar imagen segmentada
+    output_dir = "/tmp/segmentaciones"
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = f"segmentacion_kmeans_{uuid.uuid4().hex[:8]}.png"
+    output_path = os.path.join(output_dir, output_filename)
+    rgb_image.save(output_path)
+
+    # Conteo de píxeles por clase
+    pixels_per_class = {}
+    for class_id in range(k):
+        color_rgb = palette[class_id]
+        hex_color = '#%02x%02x%02x' % color_rgb
+        n_pixels = int(np.sum(labels == class_id))
+        pixels_per_class[f"Clase_{class_id}"] = {
+            "name": f"Clase_{class_id}",
+            "color": hex_color,
+            "count": n_pixels
+        }
+
+    return {
+        "classifications": pixels_per_class,
+        "image_path": output_path
+    }
+
+
+
+
+class SegDataset(Dataset):
+    def __init__(self, stack, mask):
+        self.stack = stack
+        self.mask = mask
+    def __len__(self): return self.mask.size
+    def __getitem__(self, idx):
+        h, w = divmod(idx, self.stack.shape[2])
+        patch = self.stack[:, h, w]
+        return torch.tensor(patch, dtype=torch.float32), torch.tensor(self.mask[h, w], dtype=torch.long)
+
+class MKANetLite(nn.Module):
+    def __init__(self, in_bands, n_classes=3):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_bands, 16, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(16, n_classes, kernel_size=1)
+    def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.conv2(x)
+        return x
+
+# ===========================================================================================
+# mkanet para segmentación de imágenes multibanda
+# ===========================================================================================
+
+def segmentar_con_mkanet(image_path, epochs=5):
+    # Leer el archivo TIFF multibanda
+    with rasterio.open(image_path) as src:
+        stack = src.read()  # shape: (bands, rows, cols)
+    n_bands, h, w = stack.shape
+
+    # Usar K-means para obtener una máscara inicial (etiquetas por píxel)
+    X = stack.reshape(n_bands, -1).T
+    k = 6
+    kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
+    mask = kmeans.labels_.reshape(h, w)
+
+    # Dataset y DataLoader
+    dataset = SegDataset(stack, mask)
+    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=0.2, random_state=42)
+    train_loader = DataLoader(torch.utils.data.Subset(dataset, train_idx), batch_size=256, shuffle=True)
+    val_loader = DataLoader(torch.utils.data.Subset(dataset, val_idx), batch_size=256)
+
+    # Modelo
+    model = MKANetLite(in_bands=n_bands, n_classes=int(mask.max())+1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    # Entrenamiento simple
+    for epoch in range(epochs):
+        model.train()
+        for xb, yb in train_loader:
+            xb, yb = xb.unsqueeze(-1).unsqueeze(-1).to(device), yb.to(device)
+            logits = model(xb)
+            loss = criterion(logits.view(len(xb), -1), yb)
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+    # Inferencia
+    model.eval()
+    with torch.no_grad():
+        xb_all = torch.tensor(stack, dtype=torch.float32).unsqueeze(0).to(device)
+        preds = model(xb_all).argmax(1).cpu().squeeze().numpy()
+
+    # Paleta de colores para cada clase
+    np.random.seed(42)
+    n_classes = int(mask.max())+1
+    palette = {i: tuple(np.random.randint(0, 255, 3)) for i in range(n_classes)}
+
+    # Crear imagen de clases
+    rgb_classes = np.zeros((h, w, 3), dtype=np.uint8)
+    for class_id, color in palette.items():
+        rgb_classes[preds == class_id] = color
+    rgb_image = Image.fromarray(rgb_classes)
+
+    # Guardar imagen segmentada
+    output_dir = "/tmp/segmentaciones"
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = f"segmentacion_mkanet_{uuid.uuid4().hex[:8]}.png"
+    output_path = os.path.join(output_dir, output_filename)
+    rgb_image.save(output_path)
+
+    # Conteo de píxeles por clase
+    pixels_per_class = {}
+    for class_id in range(n_classes):
+        color_rgb = palette[class_id]
+        hex_color = '#%02x%02x%02x' % color_rgb
+        n_pixels = int(np.sum(preds == class_id))
+        pixels_per_class[f"Clase_{class_id}"] = {
+            "name": f"Clase_{class_id}",
+            "color": hex_color,
+            "count": n_pixels
         }
 
     return {

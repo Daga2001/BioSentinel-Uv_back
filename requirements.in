@@ -10,3 +10,5 @@ django-cors-headers
 segment-anything
 huggingface_hub
 torchvision
+rasterio
+scikit-learn

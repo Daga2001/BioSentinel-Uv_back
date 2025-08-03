@@ -141,10 +141,12 @@ def generar_segmentacion(request):
     try:
         if modelo == "segformer-b0-ade20k":
             result = utils.segmentar_con_segformer_b0(image_path)
-            print("✅ Segmentación completada. Resultado:", result.keys())
         elif modelo == "sam":
             result = utils.segmentar_con_clipseg_sam(image_path)
-            print("✅ Segmentación completada. Resultado:", result.keys())
+        elif modelo == "k-means":
+            result = utils.segmentar_con_kmeans(image_path)
+        elif modelo == "mkanet":
+            result = utils.segmentar_con_mkanet(image_path)
         else:
             print(f"Modelo '{modelo}' no soportado aún.")
             return Response({
@@ -157,6 +159,7 @@ def generar_segmentacion(request):
             "success": False,
             "message": f"Error durante segmentación: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    print("✅ Segmentación completada. Resultado:", result.keys())
     
     # === ⏱️ Calcular tiempo de procesamiento ===
     processing_time_ms = int((time.time() - start_time) * 1000)
