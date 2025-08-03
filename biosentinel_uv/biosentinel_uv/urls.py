@@ -24,4 +24,7 @@ urlpatterns = [
     # Ruta para generar reportes con el LLM
     path('generate_env_report/',
             views.generar_informe_ambiental, name="generar_informe_ambiental"),
+    # Ruta para segmentar las imagenes con los modelos de IA y devolver las imagenes en base64 al front.
+    path('classify_image/',
+            views.generar_segmentacion, name="classify_image"),
 ]

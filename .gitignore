@@ -5,6 +5,9 @@
 
 shortcuts.txt
 **.sqlite3
+*.env
+*/migrations/*
+**/logs/*
 
 # User-specific files
 *.rsuser

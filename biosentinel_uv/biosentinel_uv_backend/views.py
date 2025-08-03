@@ -6,6 +6,11 @@ from rest_framework import status
 import os
 import openai
 
+import base64
+import os
+
+from . import utils
+
 # ===========================================================================================
 # Vista para generar un informe ambiental con GPT-4.1-nano a partir de datos satelitales.
 # Validaciones:
@@ -81,3 +86,76 @@ def generar_informe_ambiental(request):
             "reporte": report
         }
     }, status=status.HTTP_200_OK)
+
+# ===========================================================================================
+# Vista para generar una imagen segmentada a partir de un GeoJSON y un modelo especificado.
+# ===========================================================================================
+
+@api_view(['POST'])
+@authentication_classes([TokenAuthentication])
+@permission_classes([AllowAny])
+def generar_segmentacion(request):
+    """
+    Genera una imagen segmentada a partir de un modelo IA y una región definida en GeoJSON.
+
+    Body esperado:
+    {
+        "model": "GPTx",
+        "geojson": { ... }
+    }
+
+    Returns:
+    - 200 OK con:
+        - classifications: { clase: { color, count } }
+        - image: "<imagen en base64>"
+    """
+    data = request.data
+    modelo = data.get("model")
+    geojson = data.get("geojson")
+
+    # Valida el cuerpo de la solicitud
+    if not modelo or not geojson:
+        return Response({
+            "error": True,
+            "message": "Se requiere 'model' y 'geojson' en el body."
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Intenta descargar la imagen desde el geojson de la solicitud
+    try:
+        image_path = utils.descargar_imagen_desde_geojson(geojson)
+    except Exception as e:
+        return Response({
+            "error": True,
+            "message": f"Error al descargar imagen: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # === 🔍 SEGMENTACIÓN SEGÚN MODELO ===
+    try:
+        if modelo == "SegFormer-B0 ADE20K":
+            result = utils.segmentar_con_segformer_b0(image_path)
+        else:
+            return Response({
+                "error": True,
+                "message": f"Modelo '{modelo}' no soportado aún."
+            }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({
+            "error": True,
+            "message": f"Error durante segmentación: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # === 📸 Codifica imagen en base64 ===
+    try:
+        with open(result["image_path"], "rb") as image_file:
+            image_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+    except Exception as e:
+        return Response({
+            "error": True,
+            "message": f"No se pudo codificar la imagen segmentada: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({
+        "error": False,
+        "classifications": result["classifications"],
+        "image": image_base64
+    }, status=status.HTTP_200_OK)   
