@@ -5,9 +5,10 @@ from rest_framework.response import Response
 from rest_framework import status
 import os
 import openai
-
+import time
 import base64
 import os
+from django.utils import timezone
 
 from . import utils
 
@@ -41,7 +42,7 @@ def generar_informe_ambiental(request):
 
     if not pixels_per_class or not isinstance(pixels_per_class, dict):
         return Response({
-            "error": True,
+            "success": False,
             "message": "Se requiere un diccionario válido de 'pixels_per_class'."
         }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -56,7 +57,7 @@ def generar_informe_ambiental(request):
     api_key = "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"
     if not api_key:
         return Response({
-            "error": True,
+            "success": False,
             "message": "API key de OpenAI no configurada en el entorno."
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -74,12 +75,12 @@ def generar_informe_ambiental(request):
         report = response.choices[0].message.content.strip()
     except Exception as e:
         return Response({
-            "error": True,
+            "success": False,
             "message": f"Ocurrió un error al generar el informe: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response({
-        "error": False,
+        "success": True,
         "message": "Informe generado exitosamente.",
         "data": {
             "prompt_usado": summary_prompt,
@@ -102,6 +103,7 @@ def generar_segmentacion(request):
     {
         "model": "GPTx",
         "geojson": { ... }
+        "resolution": 10, # resolución en metros (opcional, por defecto 10)
     }
 
     Returns:
@@ -112,37 +114,52 @@ def generar_segmentacion(request):
     data = request.data
     modelo = data.get("model")
     geojson = data.get("geojson")
+    res = data.get("resolution", 50)  # Resolución por defecto 50 metros
 
     # Valida el cuerpo de la solicitud
     if not modelo or not geojson:
         return Response({
-            "error": True,
+            "success": False,
             "message": "Se requiere 'model' y 'geojson' en el body."
         }, status=status.HTTP_400_BAD_REQUEST)
 
     # Intenta descargar la imagen desde el geojson de la solicitud
     try:
-        image_path = utils.descargar_imagen_desde_geojson(geojson)
+        image_path = utils.descargar_imagen_desde_geojson(geojson, res)
     except Exception as e:
         return Response({
-            "error": True,
+            "success": False,
             "message": f"Error al descargar imagen: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    print("📥 Imagen descargada en:", image_path)
+
+    # Inicializa el tiempo de procesamiento
+    start_time = time.time()
+
     # === 🔍 SEGMENTACIÓN SEGÚN MODELO ===
     try:
-        if modelo == "SegFormer-B0 ADE20K":
+        if modelo == "segformer-b0-ade20k":
             result = utils.segmentar_con_segformer_b0(image_path)
+            print("✅ Segmentación completada. Resultado:", result.keys())
+        elif modelo == "sam":
+            result = utils.segmentar_con_clipseg_sam(image_path)
+            print("✅ Segmentación completada. Resultado:", result.keys())
         else:
+            print(f"Modelo '{modelo}' no soportado aún.")
             return Response({
-                "error": True,
+                "success": False,
                 "message": f"Modelo '{modelo}' no soportado aún."
             }, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        print("❌ Error al utilizar el modelo de IA:", str(e))
         return Response({
-            "error": True,
+            "success": False,
             "message": f"Error durante segmentación: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # === ⏱️ Calcular tiempo de procesamiento ===
+    processing_time_ms = int((time.time() - start_time) * 1000)
 
     # === 📸 Codifica imagen en base64 ===
     try:
@@ -150,12 +167,27 @@ def generar_segmentacion(request):
             image_base64 = base64.b64encode(image_file.read()).decode('utf-8')
     except Exception as e:
         return Response({
-            "error": True,
+            "success": False,
             "message": f"No se pudo codificar la imagen segmentada: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    # timestamp — marca de tiempo de la segmentación
+    # Esto es simplemente la hora actual en UTC en formato ISO 8601:
+    timestamp_iso = timezone.now().isoformat().replace("+00:00", "Z")
+
+    # Total de píxeles procesados
+    total_pixels = sum(c["count"] for c in result["classifications"].values())
+
     return Response({
-        "error": False,
+        "success": True,
+        "model": modelo,
+        "resolution": res,
         "classifications": result["classifications"],
-        "image": image_base64
+        "overlayImage": image_base64,
+        "metadata": {
+            "categories": len(result["classifications"]),
+            "processingTime": processing_time_ms,
+            "timestamp": timestamp_iso,
+            "totalPixels": total_pixels
+        }
     }, status=status.HTTP_200_OK)   

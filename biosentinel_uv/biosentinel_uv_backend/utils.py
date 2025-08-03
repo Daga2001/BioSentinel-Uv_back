@@ -2,7 +2,7 @@ import os
 import glob
 import ee
 import geemap
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import numpy as np
 import torch
@@ -34,32 +34,37 @@ def extract_geometry(geojson_obj):
         raise ValueError("❌ Estructura GeoJSON no reconocida.")
 
 # === Descarga imagen satelital en base a un GeoJSON ===
-def descargar_imagen_desde_geojson(geojson_obj, output_dir="downloaded_images"):
+def descargar_imagen_desde_geojson(geojson_obj, res, output_dir="downloaded_images"):
     init_earth_engine()
 
     geometry = extract_geometry(geojson_obj)
     aoi = ee.Geometry(geometry)
 
     # Configuración
+    end_date = datetime.today().date()
+    start_date = end_date - timedelta(days=30*12) # 12 meses atrás
     params = {
-        "satellite_collection": "COPERNICUS/S2_SR",
+        "satellite_collection": "COPERNICUS/S2_SR_HARMONIZED",
         "satellite_name": "SENTINEL-2",
-        "date_range": ("2022-01-01", "2023-01-31"),
-        "scale": 50,
+        "date_range": (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
+        "scale": res,
         "image_format": "tif",
         "bands": None,  # por defecto usa RGB
         "file_per_band": False
     }
 
+    # Borrar archivos previos
     os.makedirs(output_dir, exist_ok=True)
-    for f in glob.glob(os.path.join(output_dir, f"*.{params['image_format']}")):
-        os.remove(f)
+    for f in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, f)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
 
     collection = (
         ee.ImageCollection(params["satellite_collection"])
         .filterBounds(aoi)
         .filterDate(*params["date_range"])
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
     )
 
     mosaic = collection.mosaic()
@@ -112,12 +117,6 @@ def closest_css3_color_name(rgb_val):
     return closest_name
 
 def segmentar_con_segformer_b0(image_path):
-    import os
-    import uuid
-    from PIL import Image
-    import numpy as np
-    import torch
-
     # 📥 Cargar imagen
     img = Image.open(image_path).convert("RGB")
 
@@ -145,7 +144,7 @@ def segmentar_con_segformer_b0(image_path):
     # 💾 Guardar imagen segmentada
     output_dir = "/tmp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
-    output_filename = f"segmentacion_{uuid.uuid4().hex[:8]}.tif"
+    output_filename = f"segmentacion_{uuid.uuid4().hex[:8]}.png"
     output_path = os.path.join(output_dir, output_filename)
     rgb_image.save(output_path)
 
@@ -157,8 +156,85 @@ def segmentar_con_segformer_b0(image_path):
         color_rgb = palette[int(i)]
         hex_color = '#%02x%02x%02x' % color_rgb
         pixels_per_class[label] = {
+            "name": label,
             "color": hex_color,
             "count": int(counts[j])
+        }
+
+    return {
+        "classifications": pixels_per_class,
+        "image_path": output_path
+    }
+
+from huggingface_hub import hf_hub_download
+from segment_anything import sam_model_registry, SamPredictor
+from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+
+def segmentar_con_clipseg_sam(image_path):
+    # Descargar checkpoint SAM si no existe
+    checkpoint_path = hf_hub_download(
+        repo_id="segments-arnaud/sam_vit_b",
+        filename="sam_vit_b_01ec64.pth"
+    )
+
+    # Cargar imagen
+    image = Image.open(image_path).convert("RGB")
+    img_np = np.array(image)
+
+    # Preparar modelo SAM
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sam = sam_model_registry["vit_b"](checkpoint=checkpoint_path).to(device)
+    predictor = SamPredictor(sam)
+    predictor.set_image(img_np)
+
+    # Preparar modelo CLIPSeg
+    processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
+    clipseg = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined").to(device)
+
+    # Conceptos ambientales
+    concepts = [
+        "bosque primario", "vegetación secundaria", "áreas deforestadas",
+        "agua", "infraestructura minera", "suelo expuesto",
+        "zonas degradadas", "fragmentación ecológica"
+    ]
+
+    results = {}
+    for concept in concepts:
+        inputs = processor(text=concept, images=image, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = clipseg(**inputs)
+            preds = torch.sigmoid(outputs.logits).cpu().numpy()[0]
+        # Resize mask to match image shape
+        mask = (preds > 0.5).astype(np.uint8)
+        mask_img = Image.fromarray(mask * 255)
+        mask_resized = mask_img.resize((img_np.shape[1], img_np.shape[0]), resample=Image.NEAREST)
+        mask = np.array(mask_resized) // 255
+        pixel_count = int(mask.sum())
+        results[concept] = {"mask": mask, "pixels": pixel_count}
+
+    # Crear imagen de máscaras combinadas (opcional: cada clase en un color)
+    rgb_array = np.zeros((img_np.shape[0], img_np.shape[1], 3), dtype=np.uint8)
+    palette = {i: tuple(np.random.randint(0, 255, 3)) for i in range(len(concepts))}
+    for idx, concept in enumerate(concepts):
+        rgb_array[results[concept]["mask"] == 1] = palette[idx]
+    rgb_image = Image.fromarray(rgb_array)
+
+    # Guardar imagen segmentada
+    output_dir = "/tmp/segmentaciones"
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = f"segmentacion_clipseg_sam_{uuid.uuid4().hex[:8]}.png"
+    output_path = os.path.join(output_dir, output_filename)
+    rgb_image.save(output_path)
+
+    # Preparar clasificaciones
+    pixels_per_class = {}
+    for idx, concept in enumerate(concepts):
+        color_rgb = palette[idx]
+        hex_color = '#%02x%02x%02x' % color_rgb
+        pixels_per_class[concept] = {
+            "name": concept,
+            "color": hex_color,
+            "count": results[concept]["pixels"]
         }
 
     return {

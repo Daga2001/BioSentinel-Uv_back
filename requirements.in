@@ -7,3 +7,6 @@ transformers
 torch
 numpy
 django-cors-headers
+segment-anything
+huggingface_hub
+torchvision
