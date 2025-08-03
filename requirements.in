@@ -6,3 +6,4 @@ geemap
 transformers 
 torch
 numpy
+django-cors-headers

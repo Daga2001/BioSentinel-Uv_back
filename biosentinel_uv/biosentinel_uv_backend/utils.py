@@ -38,7 +38,9 @@ def descargar_imagen_desde_geojson(geojson_obj, output_dir="downloaded_images"):
     init_earth_engine()
 
     geometry = extract_geometry(geojson_obj)
+    print("geometry:",geometry)
     aoi = ee.Geometry(geometry)
+    print("aoi:",aoi)
 
     # Configuración
     params = {
@@ -112,9 +114,16 @@ def closest_css3_color_name(rgb_val):
     return closest_name
 
 def segmentar_con_segformer_b0(image_path):
+    import os
+    import uuid
+    from PIL import Image
+    import numpy as np
+    import torch
+
+    # 📥 Cargar imagen
     img = Image.open(image_path).convert("RGB")
 
-    # Preprocesamiento e inferencia
+    # 🔁 Preprocesamiento e inferencia
     inputs = feature_extractor(images=img, return_tensors="pt")
     with torch.no_grad():
         outputs = model(**inputs)
@@ -124,26 +133,25 @@ def segmentar_con_segformer_b0(image_path):
         )
         predicted = upsampled.argmax(dim=1)[0].cpu().numpy()
 
-    # Paleta aleatoria por clase
+    # 🎨 Generar paleta aleatoria
     unique_classes = np.unique(predicted)
     np.random.seed(42)
     palette = {i: tuple(np.random.randint(0, 255, 3)) for i in unique_classes}
 
-    # Crear imagen segmentada (P mode)
-    seg = Image.fromarray(predicted.astype(np.uint8), mode="P")
-    flat_palette = [0] * 768
-    for i, color in palette.items():
-        flat_palette[i * 3:i * 3 + 3] = color
-    seg.putpalette(flat_palette)
+    # 🖼️ Convertir a imagen RGB directamente (sin modo 'P')
+    rgb_array = np.zeros((predicted.shape[0], predicted.shape[1], 3), dtype=np.uint8)
+    for class_id, color in palette.items():
+        rgb_array[predicted == class_id] = color
+    rgb_image = Image.fromarray(rgb_array)
 
-    # Guardar imagen segmentada
-    output_dir = "/tmp/segmentaciones"  # o la carpeta que prefieras
+    # 💾 Guardar imagen segmentada
+    output_dir = "/tmp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"segmentacion_{uuid.uuid4().hex[:8]}.png"
     output_path = os.path.join(output_dir, output_filename)
-    seg.convert("RGB").save(output_path)
+    rgb_image.save(output_path)
 
-    # Conteo de píxeles por clase
+    # 📊 Conteo de píxeles por clase
     unique, counts = np.unique(predicted, return_counts=True)
     pixels_per_class = {}
     for j, i in enumerate(unique):
