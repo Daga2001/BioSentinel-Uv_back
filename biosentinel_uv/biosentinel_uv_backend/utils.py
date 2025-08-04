@@ -56,7 +56,7 @@ def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir
     # Sentinel-2 band names (L2A)
     all_bands = [
         "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A",
-        "B9", "B10", "B11", "B12"
+        "B9", "B11", "B12"
     ]
 
     # If model is k-means or mkanet, select all bands
@@ -153,6 +153,21 @@ def closest_css3_color_name(rgb_val):
             min_dist = dist
             closest_name = name
     return closest_name
+
+def stack_band_tiffs_to_multiband(band_paths, output_path="downloaded_images/temp_multiband.tif"):
+    band_arrays = []
+    meta = None
+    for band_file in band_paths:
+        with rasterio.open(band_file) as src:
+            band_arrays.append(src.read(1))
+            if meta is None:
+                meta = src.meta.copy()
+    stack = np.stack(band_arrays)
+    meta.update(count=len(band_arrays), dtype=stack.dtype)
+    with rasterio.open(output_path, "w", **meta) as dst:
+        for i in range(stack.shape[0]):
+            dst.write(stack[i], i + 1)
+    return output_path
 
 # =========================================================
 # ===== Segmentación con Segformer-B0 =====
