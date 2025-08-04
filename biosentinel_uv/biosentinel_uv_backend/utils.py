@@ -16,6 +16,10 @@ import uuid
 import rasterio
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
+import geopandas as gpd
+import pandas as pd
+from joblib import load
+from shapely.geometry import Point
 
 # === Inicializa Earth Engine (solo una vez) ===
 def init_earth_engine():
@@ -448,3 +452,117 @@ def segmentar_con_mkanet(image_path, epochs=5):
         "classifications": pixels_per_class,
         "image_path": output_path
     }
+
+# =========================================================
+# ===== Modelo de predicción de biodiversidad BS-1.0 =====
+# =========================================================
+
+def run_bs1_birds_model(lon, lat, radius_km=50):
+    init_earth_engine()
+
+    TAXON = "birds"
+    MODEL_PATH = f"./model/BS-1.0/models/{TAXON}_model.pkl"
+    RESOLUTION = 0.01  # grados (aprox. 1 km)
+    OUTPUT_DIR = "./model/BS-1.0/scripts/output"
+    DATA_DIR = "./cached_layers"
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    def get_bbox_from_point(lon, lat, radius_km=50):
+        deg_radius = radius_km / 111
+        return {
+            "min_lon": lon - deg_radius,
+            "max_lon": lon + deg_radius,
+            "min_lat": lat - deg_radius,
+            "max_lat": lat + deg_radius,
+        }
+
+    def download_layer_if_missing(path, gee_image, band, bbox, scale=1000):
+        if os.path.exists(path):
+            print(f"✅ {os.path.basename(path)} ya descargado.")
+            return
+        region = ee.Geometry.Rectangle([bbox["min_lon"], bbox["min_lat"], bbox["max_lon"], bbox["max_lat"]])
+        image = gee_image.select(band).clip(region)
+        print(f"⬇️ Descargando {os.path.basename(path)} desde Google Earth Engine...")
+        geemap.ee_export_image(
+            image,
+            filename=path,
+            region=region,
+            scale=scale,
+            file_per_band=False,
+            crs="EPSG:4326"
+        )
+
+    def get_gee_layers(bbox):
+        region = ee.Geometry.Rectangle([bbox["min_lon"], bbox["min_lat"], bbox["max_lon"], bbox["max_lat"]])
+        ndvi = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+            .filterDate("2023-01-01", "2023-12-31") \
+            .filterBounds(region) \
+            .median() \
+            .normalizedDifference(['B8', 'B4']).rename('NDVI')
+        lst = ee.ImageCollection("MODIS/061/MOD11A2") \
+            .filterDate("2023-01-01", "2023-12-31") \
+            .select("LST_Day_1km") \
+            .mean() \
+            .multiply(0.02).subtract(273.15).rename("LST")
+        dem = ee.ImageCollection("COPERNICUS/DEM/GLO30") \
+            .mosaic() \
+            .select('DEM') \
+            .rename('DEM')
+        return ndvi, lst, dem
+
+    def generate_grid(bbox, resolution=RESOLUTION):
+        lon_vals = np.arange(bbox["min_lon"], bbox["max_lon"], resolution)
+        lat_vals = np.arange(bbox["min_lat"], bbox["max_lat"], resolution)
+        return [(lon, lat) for lon in lon_vals for lat in lat_vals]
+
+    def extract_raster_values(points, raster_path):
+        if not os.path.exists(raster_path):
+            raise FileNotFoundError(f"{raster_path} no fue encontrado.")
+        with rasterio.open(raster_path) as src:
+            values = list(src.sample(points))
+            return np.array(values).squeeze()
+
+    def build_geojson(points, predictions_df, output_path):
+        gdf = gpd.GeoDataFrame(
+            predictions_df,
+            geometry=[Point(xy) for xy in points],
+            crs="EPSG:4326"
+        )
+        gdf.to_file(output_path, driver="GeoJSON")
+        print(f"📍 GeoJSON guardado en: {output_path}")
+        return output_path
+
+    # Main logic
+    bbox = get_bbox_from_point(lon, lat, radius_km)
+    region_name = f"loc_{lon}_{lat}_{radius_km}km".replace('.', '_').replace('-', 'm')
+    ndvi_path = f"{DATA_DIR}/{region_name}_NDVI.tif"
+    lst_path = f"{DATA_DIR}/{region_name}_LST.tif"
+    dem_path = f"{DATA_DIR}/{region_name}_DEM.tif"
+    output_geojson = f"{OUTPUT_DIR}/{region_name}_predictions.geojson"
+
+    ndvi_img, lst_img, dem_img = get_gee_layers(bbox)
+    download_layer_if_missing(ndvi_path, ndvi_img, "NDVI", bbox)
+    download_layer_if_missing(lst_path, lst_img, "LST", bbox)
+    download_layer_if_missing(dem_path, dem_img, "DEM", bbox)
+
+    points = generate_grid(bbox)
+    ndvi = extract_raster_values(points, ndvi_path)
+    lst = extract_raster_values(points, lst_path)
+    dem = extract_raster_values(points, dem_path)
+
+    df = pd.DataFrame({
+        "longitude": [pt[0] for pt in points],
+        "latitude": [pt[1] for pt in points],
+        "NDVI": ndvi,
+        "LST_C": lst,
+        "DEM": dem
+    })
+
+    model = load(MODEL_PATH)
+    y_pred = model.predict(df[["NDVI", "LST_C", "DEM", "longitude", "latitude"]])
+    df[["Biota_Overlap", "Rel_Occupancy", "Rel_Species_Richness"]] = y_pred
+
+    geojson_path = build_geojson(points, df, output_geojson)
+    return geojson_path
