@@ -147,8 +147,12 @@ def generar_segmentacion(request):
         elif modelo == "sam":
             result = utils.segmentar_con_clipseg_sam(image_path)
         elif modelo == "k-means":
+            if isinstance(image_path, list):
+                image_path = utils.stack_band_tiffs_to_multiband(image_path)
             result = utils.segmentar_con_kmeans(image_path)
         elif modelo == "mkanet":
+            if isinstance(image_path, list):
+                image_path = utils.stack_band_tiffs_to_multiband(image_path)
             result = utils.segmentar_con_mkanet(image_path)
         elif modelo == "bs1.0-birds":
             lon = data.get("longitude")
