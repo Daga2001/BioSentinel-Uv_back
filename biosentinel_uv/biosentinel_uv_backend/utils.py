@@ -472,14 +472,23 @@ def segmentar_con_mkanet(image_path, epochs=5):
 # ===== Modelo de predicción de biodiversidad BS-1.0 =====
 # =========================================================
 
-def run_bs1_birds_model(lon, lat, radius_km=50):
+def run_bs1_birds_model(lon, lat, taxon, metric, radius_km=50):
     init_earth_engine()
 
-    TAXON = "birds"
+    TAXON = taxon
     MODEL_PATH = f"./model/BS-1.0/models/{TAXON}_model.pkl"
     RESOLUTION = 0.01  # grados (aprox. 1 km)
     OUTPUT_DIR = "./model/BS-1.0/scripts/output"
     DATA_DIR = "./cached_layers"
+
+    if metric == "richness":
+        METRIC = "Rel_Species_Richness"
+    elif metric == "overlap":
+        METRIC = "Biota_Overlap"
+    elif metric == "occupancy":
+        METRIC = "Rel_Occupancy"
+    else:
+        raise ValueError("❌ Métrica no válida. Debe ser 'richness', 'overlap' o 'occupancy'.")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -577,7 +586,18 @@ def run_bs1_birds_model(lon, lat, radius_km=50):
 
     model = load(MODEL_PATH)
     y_pred = model.predict(df[["NDVI", "LST_C", "DEM", "longitude", "latitude"]])
-    df[["Biota_Overlap", "Rel_Occupancy", "Rel_Species_Richness"]] = y_pred
+    
+    # Handle single metric selection
+    if y_pred.ndim == 1:
+        df[METRIC] = y_pred
+    else:
+        # If model returns multiple columns, select the appropriate one
+        metric_columns = ["Biota_Overlap", "Rel_Occupancy", "Rel_Species_Richness"]
+        if METRIC in metric_columns:
+            metric_index = metric_columns.index(METRIC)
+            df[METRIC] = y_pred[:, metric_index]
+        else:
+            df[METRIC] = y_pred[:, 0]  # Default to first column
 
     geojson_path = build_geojson(points, df, output_geojson)
     return geojson_path

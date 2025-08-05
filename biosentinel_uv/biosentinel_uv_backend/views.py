@@ -117,7 +117,7 @@ def generar_segmentacion(request):
     res = data.get("resolution", 50)  # Resolución por defecto 50 metros
 
     # Valida el cuerpo de la solicitud
-    if not modelo or not geojson:
+    if not modelo or not geojson and modelo != "bs1.0":
         return Response({
             "success": False,
             "message": "Se requiere 'model' y 'geojson' en el body."
@@ -125,7 +125,7 @@ def generar_segmentacion(request):
 
     # Intenta descargar la imagen desde el geojson de la solicitud
     try:
-        if modelo == "bs1.0-birds":
+        if modelo == "bs1.0":
             image_path = None  # No descargar imagen, este modelo no la necesita
         else:
             image_path = utils.descargar_imagen_desde_geojson(geojson, res, modelo)
@@ -154,7 +154,9 @@ def generar_segmentacion(request):
             if isinstance(image_path, list):
                 image_path = utils.stack_band_tiffs_to_multiband(image_path)
             result = utils.segmentar_con_mkanet(image_path)
-        elif modelo == "bs1.0-birds":
+        elif modelo == "bs1.0":
+            taxon = data.get("taxon")
+            metric = data.get("metric")
             lon = data.get("longitude")
             lat = data.get("latitude")
             radius_km = data.get("radius_km", 50)
@@ -163,7 +165,7 @@ def generar_segmentacion(request):
                     "success": False,
                     "message": "Se requiere 'longitude' y 'latitude' en el body para el modelo bs1.0-birds."
                 }, status=status.HTTP_400_BAD_REQUEST)
-            geojson_path = utils.run_bs1_birds_model(lon, lat, radius_km)
+            geojson_path = utils.run_bs1_birds_model(lon, lat, taxon, metric, radius_km)
             # Obtiene el archivo GeoJSON directamente
             with open(geojson_path, "r", encoding="utf-8") as f:
                 geojson_content = f.read()
