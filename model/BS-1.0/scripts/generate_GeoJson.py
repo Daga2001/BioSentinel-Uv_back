@@ -24,11 +24,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # BBox para el Parque Nacional Chiribiquete
 bbox = {
-   "min_lon": -76.6,
-   "max_lon": -76.4,
-   "min_lat": 2.6,
-   "max_lat": 2.8,
-}
+  "min_lon": -74.728103,
+  "max_lon": -71.025195,
+  "min_lat": -0.001802,
+  "max_lat": 2.911496,
+};
+
 
 NDVI_PATH = f"{DATA_DIR}/{REGION_NAME}_NDVI.tif"
 LST_PATH = f"{DATA_DIR}/{REGION_NAME}_LST.tif"
