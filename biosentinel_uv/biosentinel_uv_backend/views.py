@@ -132,7 +132,8 @@ def generar_segmentacion(request):
     except Exception as e:
         return Response({
             "success": False,
-            "message": f"Error al descargar imagen: {str(e)}"
+            "message": f"Error al descargar imagen: {str(e)}",
+            "error_type": type(e).__name__
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     print("📥 Imagen descargada en:", image_path)
@@ -184,7 +185,9 @@ def generar_segmentacion(request):
         print("❌ Error al utilizar el modelo de IA:", str(e))
         return Response({
             "success": False,
-            "message": f"Error durante segmentación: {str(e)}"
+            "message": f"Error durante segmentación: {str(e)}",
+            "error_type": type(e).__name__,
+            "model_used": modelo
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     print("✅ Segmentación completada. Resultado:", result.keys())
     
@@ -198,7 +201,8 @@ def generar_segmentacion(request):
     except Exception as e:
         return Response({
             "success": False,
-            "message": f"No se pudo codificar la imagen segmentada: {str(e)}"
+            "message": f"No se pudo codificar la imagen segmentada: {str(e)}",
+            "error_type": type(e).__name__
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # timestamp — marca de tiempo de la segmentación

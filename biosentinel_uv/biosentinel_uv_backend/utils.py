@@ -137,32 +137,92 @@ def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir
             band_img = mosaic.select([band]).visualize(min=0, max=3000)
             filename = f"{band}_{params['satellite_name']}_mosaic_{band}.{params['image_format']}"
             output_path = os.path.join(output_dir, filename)
+
+            # Verificar si la banda es demasiado grande para descargar
+            try:
+                _ = band_img.getDownloadURL({
+                    "scale": params["scale"],
+                    "region": aoi,
+                    "format": "GEO_TIFF"
+                })
+            except Exception as e:
+                error_msg = str(e)
+                if "Total request size" in error_msg:
+                    raise Exception(f"Band {band} too large for download: {error_msg}")
+                else:
+                    raise
+
+            # Exportar imagen
+            try:
+                geemap.ee_export_image(
+                    ee_object=band_img,
+                    filename=output_path,
+                    scale=params["scale"],
+                    region=aoi,
+                    file_per_band=False,
+                )
+            except Exception as e:
+                error_msg = str(e)
+                if "Total request size" in error_msg and "bytes) must be less than" in error_msg:
+                    raise Exception(f"Band {band} too large for download: {error_msg}")
+                else:
+                    raise # vuelve a lanzar el error original
+            return output_path
+        
+        try:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                band_paths = list(executor.map(export_band, bands_to_use))
+            # Verify all files exist
+            for path in band_paths:
+                if not os.path.exists(path):
+                    raise Exception(f"Band export completed but file not found: {path}")
+        except Exception as e:
+            raise Exception(f"Parallel band export failed: {str(e)}")
+        return band_paths
+    else:
+        # Exportar imagen RGB combinada
+        mosaic = mosaic.visualize(min=0, max=3000, bands=bands_to_use)
+        try:
+            image_date = ee.Date(collection.first().get("system:time_start")).format("YYYY-MM-dd").getInfo()
+        except Exception as e:
+            raise Exception(f"Error getting image date: {str(e)}")
+        
+        # Verificar si la imagen es demasiado grande para descargar
+        try:
+            _ = mosaic.getDownloadURL({
+                "scale": params["scale"],
+                "region": aoi,
+                "format": "GEO_TIFF"
+            })
+        except Exception as e:
+            error_msg = str(e)
+            if "Total request size" in error_msg:
+                raise Exception(f"Image too large for download: {error_msg}")
+            else:
+                raise
+        
+        band_suffix = "custom" if params["bands"] else "RGB"
+        filename = f"{image_date}_{params['satellite_name']}_mosaic_{band_suffix}.{params['image_format']}"
+        output_path = os.path.join(output_dir, filename)
+        
+        try:
             geemap.ee_export_image(
-                ee_object=band_img,
+                ee_object=mosaic,
                 filename=output_path,
                 scale=params["scale"],
                 region=aoi,
                 file_per_band=False,
             )
-            return output_path
+            # Check if file was actually created
+            if not os.path.exists(output_path):
+                raise Exception(f"GEE export completed but file not found: {output_path}")
+        except Exception as e:
+            error_msg = str(e)
+            if "Total request size" in error_msg and "bytes) must be less than" in error_msg:
+                raise Exception(f"Image too large for download: {error_msg}")
+            else:
+                raise # vuelve a lanzar el error original
         
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            band_paths = list(executor.map(export_band, bands_to_use))
-        return band_paths
-    else:
-        # Exportar imagen RGB combinada
-        mosaic = mosaic.visualize(min=0, max=3000, bands=bands_to_use)
-        image_date = ee.Date(collection.first().get("system:time_start")).format("YYYY-MM-dd").getInfo()
-        band_suffix = "custom" if params["bands"] else "RGB"
-        filename = f"{image_date}_{params['satellite_name']}_mosaic_{band_suffix}.{params['image_format']}"
-        output_path = os.path.join(output_dir, filename)
-        geemap.ee_export_image(
-            ee_object=mosaic,
-            filename=output_path,
-            scale=params["scale"],
-            region=aoi,
-            file_per_band=False,
-        )
         return output_path
 
 # Caché global para modelos
