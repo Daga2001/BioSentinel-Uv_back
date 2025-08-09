@@ -24,6 +24,9 @@ _huggingface_hub = None
 _segment_anything = None
 _PIL = None
 
+# Devuelve número de cores lógicos disponibles
+num_workers = os.cpu_count()  
+
 def _get_torch():
     global _torch
     if _torch is None:
@@ -131,7 +134,7 @@ def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir
     if params["file_per_band"]:
         # Exportar cada banda como archivo .tif separado (paralelo)
         def export_band(band):
-            band_img = mosaic.select([band])
+            band_img = mosaic.select([band]).visualize(min=0, max=3000)
             filename = f"{band}_{params['satellite_name']}_mosaic_{band}.{params['image_format']}"
             output_path = os.path.join(output_dir, filename)
             geemap.ee_export_image(
@@ -143,7 +146,7 @@ def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir
             )
             return output_path
         
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
             band_paths = list(executor.map(export_band, bands_to_use))
         return band_paths
     else:
@@ -536,7 +539,7 @@ def segmentar_con_mkanet(image_path, epochs=3):
     # Dataset y DataLoader optimizado
     dataset = SegDataset(stack, mask)
     train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=0.15, random_state=42)
-    train_loader = torch_lib['DataLoader'](torch_lib['torch'].utils.data.Subset(dataset, train_idx), batch_size=512, shuffle=True, num_workers=2)
+    train_loader = torch_lib['DataLoader'](torch_lib['torch'].utils.data.Subset(dataset, train_idx), batch_size=512, shuffle=True, num_workers=num_workers)
     
     # Modelo
     model = create_mkanet_lite(in_bands=n_bands, n_classes=int(mask.max())+1)
