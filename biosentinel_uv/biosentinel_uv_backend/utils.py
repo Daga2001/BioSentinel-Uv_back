@@ -5,21 +5,59 @@ import geemap
 from datetime import datetime, timedelta
 import base64
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
-import os
-import io
 import uuid
 import rasterio
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
 import geopandas as gpd
 import pandas as pd
 from joblib import load
 from shapely.geometry import Point
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import threading
+from functools import lru_cache
+# Lazy imports for heavy libraries
+_torch = None
+_transformers = None
+_huggingface_hub = None
+_segment_anything = None
+_PIL = None
+
+# Devuelve número de cores lógicos disponibles
+num_workers = os.cpu_count()  
+
+def _get_torch():
+    global _torch
+    if _torch is None:
+        import torch
+        import torch.nn as nn
+        from torch.utils.data import Dataset, DataLoader
+        _torch = {'torch': torch, 'nn': nn, 'Dataset': Dataset, 'DataLoader': DataLoader}
+    return _torch
+
+def _get_transformers():
+    global _transformers
+    if _transformers is None:
+        from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation, CLIPSegProcessor, CLIPSegForImageSegmentation
+        _transformers = {'SegformerFeatureExtractor': SegformerFeatureExtractor, 'SegformerForSemanticSegmentation': SegformerForSemanticSegmentation, 'CLIPSegProcessor': CLIPSegProcessor, 'CLIPSegForImageSegmentation': CLIPSegForImageSegmentation}
+    return _transformers
+
+def _get_PIL():
+    global _PIL
+    if _PIL is None:
+        from PIL import Image
+        _PIL = Image
+    return _PIL
+
+def _get_sam():
+    global _huggingface_hub, _segment_anything
+    if _huggingface_hub is None or _segment_anything is None:
+        from huggingface_hub import hf_hub_download
+        from segment_anything import sam_model_registry, SamPredictor
+        _huggingface_hub = hf_hub_download
+        _segment_anything = {'sam_model_registry': sam_model_registry, 'SamPredictor': SamPredictor}
+    return _huggingface_hub, _segment_anything
 
 # === Inicializa Earth Engine (solo una vez) ===
 def init_earth_engine():
@@ -94,44 +132,111 @@ def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir
 
     # Exportar imágenes
     if params["file_per_band"]:
-        # Exportar cada banda como archivo .tif separado
-        band_paths = []
-        for band in bands_to_use:
-            band_img = mosaic.select([band])
+        # Exportar cada banda como archivo .tif separado (paralelo)
+        def export_band(band):
+            band_img = mosaic.select([band]).visualize(min=0, max=3000)
             filename = f"{band}_{params['satellite_name']}_mosaic_{band}.{params['image_format']}"
             output_path = os.path.join(output_dir, filename)
+
+            # Verificar si la banda es demasiado grande para descargar
+            try:
+                _ = band_img.getDownloadURL({
+                    "scale": params["scale"],
+                    "region": aoi,
+                    "format": "GEO_TIFF"
+                })
+            except Exception as e:
+                error_msg = str(e)
+                if "Total request size" in error_msg:
+                    raise Exception(f"Band {band} too large for download: {error_msg}")
+                else:
+                    raise
+
+            # Exportar imagen
+            try:
+                geemap.ee_export_image(
+                    ee_object=band_img,
+                    filename=output_path,
+                    scale=params["scale"],
+                    region=aoi,
+                    file_per_band=False,
+                )
+            except Exception as e:
+                error_msg = str(e)
+                if "Total request size" in error_msg and "bytes) must be less than" in error_msg:
+                    raise Exception(f"Band {band} too large for download: {error_msg}")
+                else:
+                    raise # vuelve a lanzar el error original
+            return output_path
+        
+        try:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                band_paths = list(executor.map(export_band, bands_to_use))
+            # Verify all files exist
+            for path in band_paths:
+                if not os.path.exists(path):
+                    raise Exception(f"Band export completed but file not found: {path}")
+        except Exception as e:
+            raise Exception(f"Parallel band export failed: {str(e)}")
+        return band_paths
+    else:
+        # Exportar imagen RGB combinada
+        mosaic = mosaic.visualize(min=0, max=3000, bands=bands_to_use)
+        try:
+            image_date = ee.Date(collection.first().get("system:time_start")).format("YYYY-MM-dd").getInfo()
+        except Exception as e:
+            raise Exception(f"Error getting image date: {str(e)}")
+        
+        # Verificar si la imagen es demasiado grande para descargar
+        try:
+            _ = mosaic.getDownloadURL({
+                "scale": params["scale"],
+                "region": aoi,
+                "format": "GEO_TIFF"
+            })
+        except Exception as e:
+            error_msg = str(e)
+            if "Total request size" in error_msg:
+                raise Exception(f"Image too large for download: {error_msg}")
+            else:
+                raise
+        
+        band_suffix = "custom" if params["bands"] else "RGB"
+        filename = f"{image_date}_{params['satellite_name']}_mosaic_{band_suffix}.{params['image_format']}"
+        output_path = os.path.join(output_dir, filename)
+        
+        try:
             geemap.ee_export_image(
-                ee_object=band_img,
+                ee_object=mosaic,
                 filename=output_path,
                 scale=params["scale"],
                 region=aoi,
                 file_per_band=False,
             )
-            band_paths.append(output_path)
-        return band_paths  # Devuelve lista de archivos por banda
-    else:
-        # Exportar imagen RGB combinada
-        mosaic = mosaic.visualize(min=0, max=3000, bands=bands_to_use)
-        image_date = ee.Date(collection.first().get("system:time_start")).format("YYYY-MM-dd").getInfo()
-        band_suffix = "custom" if params["bands"] else "RGB"
-        filename = f"{image_date}_{params['satellite_name']}_mosaic_{band_suffix}.{params['image_format']}"
-        output_path = os.path.join(output_dir, filename)
-        geemap.ee_export_image(
-            ee_object=mosaic,
-            filename=output_path,
-            scale=params["scale"],
-            region=aoi,
-            file_per_band=False,
-        )
+            # Check if file was actually created
+            if not os.path.exists(output_path):
+                raise Exception(f"GEE export completed but file not found: {output_path}")
+        except Exception as e:
+            error_msg = str(e)
+            if "Total request size" in error_msg and "bytes) must be less than" in error_msg:
+                raise Exception(f"Image too large for download: {error_msg}")
+            else:
+                raise # vuelve a lanzar el error original
+        
         return output_path
 
-# Carga global (opcional para eficiencia)
-model_id = "nvidia/segformer-b0-finetuned-ade-512-512"
-feature_extractor = SegformerFeatureExtractor.from_pretrained(model_id)
-model = SegformerForSemanticSegmentation.from_pretrained(model_id)
-model.eval()
+# Caché global para modelos
+_segformer_cache = {}
+_model_lock = threading.Lock()
 
-class_labels = model.config.id2label
+@lru_cache(maxsize=1)
+def get_segformer_model():
+    transformers = _get_transformers()
+    model_id = "nvidia/segformer-b0-finetuned-ade-512-512"
+    feature_extractor = transformers['SegformerFeatureExtractor'].from_pretrained(model_id)
+    model = transformers['SegformerForSemanticSegmentation'].from_pretrained(model_id)
+    model.eval()
+    return feature_extractor, model, model.config.id2label
 
 # Diccionario CSS3 reducido
 css3_colors_rgb = {
@@ -174,15 +279,20 @@ def stack_band_tiffs_to_multiband(band_paths, output_path="downloaded_images/tem
 # =========================================================
 
 def segmentar_con_segformer_b0(image_path):
+    # Lazy loading
+    PIL_Image = _get_PIL()
+    torch_lib = _get_torch()
+    feature_extractor, model, class_labels = get_segformer_model()
+    
     # 📥 Cargar imagen
-    img = Image.open(image_path).convert("RGB")
+    img = PIL_Image.open(image_path).convert("RGB")
 
     # 🔁 Preprocesamiento e inferencia
     inputs = feature_extractor(images=img, return_tensors="pt")
-    with torch.no_grad():
+    with torch_lib['torch'].no_grad():
         outputs = model(**inputs)
         logits = outputs.logits
-        upsampled = torch.nn.functional.interpolate(
+        upsampled = torch_lib['torch'].nn.functional.interpolate(
             logits, size=img.size[::-1], mode="bilinear", align_corners=False
         )
         predicted = upsampled.argmax(dim=1)[0].cpu().numpy()
@@ -196,7 +306,7 @@ def segmentar_con_segformer_b0(image_path):
     rgb_array = np.zeros((predicted.shape[0], predicted.shape[1], 3), dtype=np.uint8)
     for class_id, color in palette.items():
         rgb_array[predicted == class_id] = color
-    rgb_image = Image.fromarray(rgb_array)
+    rgb_image = PIL_Image.fromarray(rgb_array)
 
     # 💾 Guardar imagen segmentada
     output_dir = "/tmp/segmentaciones"
@@ -223,15 +333,17 @@ def segmentar_con_segformer_b0(image_path):
         "image_path": output_path
     }
 
-from huggingface_hub import hf_hub_download
-from segment_anything import sam_model_registry, SamPredictor
-from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
-
 # =========================================================
 # ===== Segmentación con CLIPSeg y SAM =====
 # =========================================================
 
 def segmentar_con_clipseg_sam(image_path):
+    # Lazy loading
+    PIL_Image = _get_PIL()
+    torch_lib = _get_torch()
+    transformers = _get_transformers()
+    hf_hub_download, sam_lib = _get_sam()
+    
     # Descargar checkpoint SAM si no existe
     checkpoint_path = hf_hub_download(
         repo_id="segments-arnaud/sam_vit_b",
@@ -239,18 +351,18 @@ def segmentar_con_clipseg_sam(image_path):
     )
 
     # Cargar imagen
-    image = Image.open(image_path).convert("RGB")
+    image = PIL_Image.open(image_path).convert("RGB")
     img_np = np.array(image)
 
     # Preparar modelo SAM
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    sam = sam_model_registry["vit_b"](checkpoint=checkpoint_path).to(device)
-    predictor = SamPredictor(sam)
+    device = "cuda" if torch_lib['torch'].cuda.is_available() else "cpu"
+    sam = sam_lib['sam_model_registry']["vit_b"](checkpoint=checkpoint_path).to(device)
+    predictor = sam_lib['SamPredictor'](sam)
     predictor.set_image(img_np)
 
     # Preparar modelo CLIPSeg
-    processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
-    clipseg = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined").to(device)
+    processor = transformers['CLIPSegProcessor'].from_pretrained("CIDAS/clipseg-rd64-refined")
+    clipseg = transformers['CLIPSegForImageSegmentation'].from_pretrained("CIDAS/clipseg-rd64-refined").to(device)
 
     # Conceptos ambientales
     concepts = [
@@ -262,13 +374,13 @@ def segmentar_con_clipseg_sam(image_path):
     results = {}
     for concept in concepts:
         inputs = processor(text=concept, images=image, return_tensors="pt").to(device)
-        with torch.no_grad():
+        with torch_lib['torch'].no_grad():
             outputs = clipseg(**inputs)
-            preds = torch.sigmoid(outputs.logits).cpu().numpy()[0]
+            preds = torch_lib['torch'].sigmoid(outputs.logits).cpu().numpy()[0]
         # Resize mask to match image shape
         mask = (preds > 0.5).astype(np.uint8)
-        mask_img = Image.fromarray(mask * 255)
-        mask_resized = mask_img.resize((img_np.shape[1], img_np.shape[0]), resample=Image.NEAREST)
+        mask_img = PIL_Image.fromarray(mask * 255)
+        mask_resized = mask_img.resize((img_np.shape[1], img_np.shape[0]), resample=PIL_Image.NEAREST)
         mask = np.array(mask_resized) // 255
         pixel_count = int(mask.sum())
         results[concept] = {"mask": mask, "pixels": pixel_count}
@@ -278,7 +390,7 @@ def segmentar_con_clipseg_sam(image_path):
     palette = {i: tuple(np.random.randint(0, 255, 3)) for i in range(len(concepts))}
     for idx, concept in enumerate(concepts):
         rgb_array[results[concept]["mask"] == 1] = palette[idx]
-    rgb_image = Image.fromarray(rgb_array)
+    rgb_image = PIL_Image.fromarray(rgb_array)
 
     # Guardar imagen segmentada
     output_dir = "/tmp/segmentaciones"
@@ -304,10 +416,76 @@ def segmentar_con_clipseg_sam(image_path):
     }
 
 # =========================================================
+# ==== Función para calcular k óptimo ====
+# =========================================================
+
+# Global function for multiprocessing
+_X_sample_global = None
+
+def _compute_k_metrics(k):
+    kmeans = KMeans(n_clusters=k, random_state=0, n_init=10, init="k-means++").fit(_X_sample_global)
+    return kmeans.inertia_, silhouette_score(_X_sample_global, kmeans.labels_)
+
+def calculate_optimal_k(X, k_range=(2, 11), max_samples=10000):
+    global _X_sample_global
+    
+    # Muestra para acelerar en datasets grandes
+    if X.shape[0] > max_samples:
+        idx = np.random.choice(X.shape[0], max_samples, replace=False)
+        _X_sample_global = X[idx]
+    else:
+        _X_sample_global = X
+    
+    k_values = list(range(*k_range))
+    
+    # Función para encontrar Elbow por distancia al segmento
+    def find_elbow_by_distance(ks, inertias):
+        ks = np.array(ks)
+        inertias = np.array(inertias)
+        x1, y1 = ks[0], inertias[0]
+        x2, y2 = ks[-1], inertias[-1]
+        num = np.abs((y2 - y1) * ks - (x2 - x1) * inertias + x2 * y1 - y2 * x1)
+        den = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2)
+        distances = num / den
+        return int(ks[np.argmax(distances)])
+    
+    # Calcular métricas secuencialmente para evitar pickle issues
+    inertias = []
+    silhouettes = []
+    for k in k_values:
+        inertia, silhouette = _compute_k_metrics(k)
+        inertias.append(inertia)
+        silhouettes.append(silhouette)
+    
+    # Selección combinada
+    k_sil = k_values[np.argmax(silhouettes)]
+    k_elbow = find_elbow_by_distance(k_values, inertias)
+    
+    # Buscar mejor silhouette dentro de ±1 del elbow
+    candidates = [k for k in k_values if abs(k - k_elbow) <= 1]
+    sil_by_k = {k: silhouettes[i] for i, k in enumerate(k_values)}
+    k_best_sil = max(candidates, key=lambda kk: sil_by_k[kk])
+    
+    # Umbral de mejora mínima en silhouette
+    SIL_DIFF_THRESHOLD = 0.02
+    if (sil_by_k[k_best_sil] - sil_by_k[k_elbow]) < SIL_DIFF_THRESHOLD:
+        k_optimo = k_elbow
+    else:
+        k_optimo = k_best_sil
+    
+    print(f"Elbow sugiere k={k_elbow}, Silhouette sugiere k={k_sil}")
+    print(f"➡ K óptimo seleccionado = {k_optimo}")
+    
+    return k_optimo
+
+# =========================================================
 # ==== Segmentación con K-means en imágenes multibanda ====
 # =========================================================
 
-def segmentar_con_kmeans(image_path, k=6):
+def segmentar_con_kmeans(image_path, k=None):
+    # Lazy loading
+    PIL_Image = _get_PIL()
+    
     # Leer el archivo TIFF multibanda
     with rasterio.open(image_path) as src:
         stack = src.read()  # shape: (bands, rows, cols)
@@ -315,6 +493,10 @@ def segmentar_con_kmeans(image_path, k=6):
 
     # Reorganizar para clustering: (n_pixels, n_bands)
     X = stack.reshape(n_bands, -1).T  # shape: (n_pixels, n_bands)
+
+    # Calcular k óptimo si no se proporciona
+    if k is None:
+        k = calculate_optimal_k(X)
 
     # Clustering K-means
     kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
@@ -338,7 +520,7 @@ def segmentar_con_kmeans(image_path, k=6):
     rgb_classes = np.zeros((h, w, 3), dtype=np.uint8)
     for class_id, color in palette.items():
         rgb_classes[labels == class_id] = color
-    rgb_image = Image.fromarray(rgb_classes)
+    rgb_image = PIL_Image.fromarray(rgb_classes)
 
     # Guardar imagen segmentada
     output_dir = "/tmp/segmentaciones"
@@ -367,32 +549,42 @@ def segmentar_con_kmeans(image_path, k=6):
 
 
 
-class SegDataset(Dataset):
+class SegDataset:
     def __init__(self, stack, mask):
         self.stack = stack
         self.mask = mask
     def __len__(self): return self.mask.size
     def __getitem__(self, idx):
+        torch_lib = _get_torch()
         h, w = divmod(idx, self.stack.shape[2])
         patch = self.stack[:, h, w]
-        return torch.tensor(patch, dtype=torch.float32), torch.tensor(self.mask[h, w], dtype=torch.long)
+        return torch_lib['torch'].tensor(patch, dtype=torch_lib['torch'].float32), torch_lib['torch'].tensor(self.mask[h, w], dtype=torch_lib['torch'].long)
 
-class MKANetLite(nn.Module):
-    def __init__(self, in_bands, n_classes=3):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_bands, 16, kernel_size=3, padding=1)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv2d(16, n_classes, kernel_size=1)
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.conv2(x)
-        return x
+def create_mkanet_lite(in_bands, n_classes=3):
+    torch_lib = _get_torch()
+    
+    class MKANetLite(torch_lib['nn'].Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = torch_lib['nn'].Conv2d(in_bands, 16, kernel_size=3, padding=1)
+            self.relu = torch_lib['nn'].ReLU()
+            self.conv2 = torch_lib['nn'].Conv2d(16, n_classes, kernel_size=1)
+        def forward(self, x):
+            x = self.relu(self.conv1(x))
+            x = self.conv2(x)
+            return x
+    
+    return MKANetLite()
 
 # ===========================================================================================
 # mkanet para segmentación de imágenes multibanda
 # ===========================================================================================
 
-def segmentar_con_mkanet(image_path, epochs=5):
+def segmentar_con_mkanet(image_path, epochs=3):
+    # Lazy loading
+    torch_lib = _get_torch()
+    PIL_Image = _get_PIL()
+    
     # Leer el archivo TIFF multibanda
     with rasterio.open(image_path) as src:
         stack = src.read()  # shape: (bands, rows, cols)
@@ -400,25 +592,24 @@ def segmentar_con_mkanet(image_path, epochs=5):
 
     # Usar K-means para obtener una máscara inicial (etiquetas por píxel)
     X = stack.reshape(n_bands, -1).T
-    k = 6
+    k = calculate_optimal_k(X)
     kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
     mask = kmeans.labels_.reshape(h, w)
 
-    # Dataset y DataLoader
+    # Dataset y DataLoader optimizado
     dataset = SegDataset(stack, mask)
-    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=0.2, random_state=42)
-    train_loader = DataLoader(torch.utils.data.Subset(dataset, train_idx), batch_size=256, shuffle=True)
-    val_loader = DataLoader(torch.utils.data.Subset(dataset, val_idx), batch_size=256)
-
+    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=0.15, random_state=42)
+    train_loader = torch_lib['DataLoader'](torch_lib['torch'].utils.data.Subset(dataset, train_idx), batch_size=512, shuffle=True, num_workers=num_workers)
+    
     # Modelo
-    model = MKANetLite(in_bands=n_bands, n_classes=int(mask.max())+1)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = create_mkanet_lite(in_bands=n_bands, n_classes=int(mask.max())+1)
+    device = torch_lib['torch'].device("cuda" if torch_lib['torch'].cuda.is_available() else "cpu")
     model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = torch_lib['nn'].CrossEntropyLoss()
+    optimizer = torch_lib['torch'].optim.Adam(model.parameters(), lr=1e-3)
 
-    # Entrenamiento simple
+    # Entrenamiento optimizado
     for epoch in range(epochs):
         model.train()
         for xb, yb in train_loader:
@@ -429,8 +620,8 @@ def segmentar_con_mkanet(image_path, epochs=5):
 
     # Inferencia
     model.eval()
-    with torch.no_grad():
-        xb_all = torch.tensor(stack, dtype=torch.float32).unsqueeze(0).to(device)
+    with torch_lib['torch'].no_grad():
+        xb_all = torch_lib['torch'].tensor(stack, dtype=torch_lib['torch'].float32).unsqueeze(0).to(device)
         preds = model(xb_all).argmax(1).cpu().squeeze().numpy()
 
     # Paleta de colores para cada clase
@@ -442,7 +633,7 @@ def segmentar_con_mkanet(image_path, epochs=5):
     rgb_classes = np.zeros((h, w, 3), dtype=np.uint8)
     for class_id, color in palette.items():
         rgb_classes[preds == class_id] = color
-    rgb_image = Image.fromarray(rgb_classes)
+    rgb_image = PIL_Image.fromarray(rgb_classes)
 
     # Guardar imagen segmentada
     output_dir = "/tmp/segmentaciones"
@@ -472,14 +663,23 @@ def segmentar_con_mkanet(image_path, epochs=5):
 # ===== Modelo de predicción de biodiversidad BS-1.0 =====
 # =========================================================
 
-def run_bs1_birds_model(lon, lat, radius_km=50):
+def run_bs1_birds_model(lon, lat, taxon, metric, radius_km=50):
     init_earth_engine()
 
-    TAXON = "birds"
+    TAXON = taxon
     MODEL_PATH = f"./model/BS-1.0/models/{TAXON}_model.pkl"
     RESOLUTION = 0.01  # grados (aprox. 1 km)
     OUTPUT_DIR = "./model/BS-1.0/scripts/output"
     DATA_DIR = "./cached_layers"
+
+    if metric == "richness":
+        METRIC = "Rel_Species_Richness"
+    elif metric == "overlap":
+        METRIC = "Biota_Overlap"
+    elif metric == "occupancy":
+        METRIC = "Rel_Occupancy"
+    else:
+        raise ValueError("❌ Métrica no válida. Debe ser 'richness', 'overlap' o 'occupancy'.")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -577,7 +777,18 @@ def run_bs1_birds_model(lon, lat, radius_km=50):
 
     model = load(MODEL_PATH)
     y_pred = model.predict(df[["NDVI", "LST_C", "DEM", "longitude", "latitude"]])
-    df[["Biota_Overlap", "Rel_Occupancy", "Rel_Species_Richness"]] = y_pred
+    
+    # Handle single metric selection
+    if y_pred.ndim == 1:
+        df[METRIC] = y_pred
+    else:
+        # If model returns multiple columns, select the appropriate one
+        metric_columns = ["Biota_Overlap", "Rel_Occupancy", "Rel_Species_Richness"]
+        if METRIC in metric_columns:
+            metric_index = metric_columns.index(METRIC)
+            df[METRIC] = y_pred[:, metric_index]
+        else:
+            df[METRIC] = y_pred[:, 0]  # Default to first column
 
     geojson_path = build_geojson(points, df, output_geojson)
     return geojson_path

@@ -8,7 +8,8 @@ shortcuts.txt
 *.env
 */migrations/*
 **/logs/*
-*/downloaded_images/*
+**/downloaded_images/*
+**/output/*
 
 # User-specific files
 *.rsuser
