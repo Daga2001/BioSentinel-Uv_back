@@ -663,7 +663,7 @@ def segmentar_con_mkanet(image_path, epochs=3):
 # ===== Modelo de predicción de biodiversidad BS-1.0 =====
 # =========================================================
 
-def run_bs1_birds_model(lon, lat, taxon, metric, radius_km=50):
+def run_bs1_model(lon, lat, taxon, metric, radius_km=50):
     init_earth_engine()
 
     TAXON = taxon

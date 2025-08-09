@@ -14,3 +14,7 @@ rasterio
 scikit-learn
 geopandas
 datasets
+gunicorn
+whitenoise
+dj-database-url
+psycopg2-binary

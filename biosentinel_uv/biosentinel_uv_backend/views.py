@@ -164,9 +164,9 @@ def generar_segmentacion(request):
             if lon is None or lat is None:
                 return Response({
                     "success": False,
-                    "message": "Se requiere 'longitude' y 'latitude' en el body para el modelo bs1.0-birds."
+                    "message": "Se requiere 'longitude' y 'latitude' en el body para el modelo bs1.0."
                 }, status=status.HTTP_400_BAD_REQUEST)
-            geojson_path = utils.run_bs1_birds_model(lon, lat, taxon, metric, radius_km)
+            geojson_path = utils.run_bs1_model(lon, lat, taxon, metric, radius_km)
             # Obtiene el archivo GeoJSON directamente
             with open(geojson_path, "r", encoding="utf-8") as f:
                 geojson_content = f.read()
