@@ -23,7 +23,7 @@ from shapely.geometry import Point
 
 # === Inicializa Earth Engine (solo una vez) ===
 def init_earth_engine():
-    project_id = 'biosentineluv'
+    project_id = 'biosentinel-uv'
     try:
         ee.Initialize(project=project_id)
     except Exception:
@@ -472,14 +472,14 @@ def segmentar_con_mkanet(image_path, epochs=5):
 # ===== Modelo de predicción de biodiversidad BS-1.0 =====
 # =========================================================
 
-def run_bs1_birds_model(lon, lat, radius_km=50):
+def run_bs1_model(lon, lat, radius_km=50):
     init_earth_engine()
 
     TAXON = "birds"
-    MODEL_PATH = f"./model/BS-1.0/models/{TAXON}_model.pkl"
+    MODEL_PATH = f"../model/BS-1.0/models/{TAXON}_model.pkl"
     RESOLUTION = 0.01  # grados (aprox. 1 km)
-    OUTPUT_DIR = "./model/BS-1.0/scripts/output"
-    DATA_DIR = "./cached_layers"
+    OUTPUT_DIR = "../model/BS-1.0/scripts/output"
+    DATA_DIR = "../cached_layers"
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)

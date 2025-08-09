@@ -27,4 +27,6 @@ urlpatterns = [
     # Ruta para segmentar las imagenes con los modelos de IA y devolver las imagenes en base64 al front.
     path('classify_image/',
             views.generar_segmentacion, name="classify_image"),
+    path('bs10/', 
+            views.generar_segmentacion_bs10, name="bs10"),
 ]
