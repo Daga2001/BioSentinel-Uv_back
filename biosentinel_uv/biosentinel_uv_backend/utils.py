@@ -43,7 +43,7 @@ def extract_geometry(geojson_obj):
         raise ValueError("❌ Estructura GeoJSON no reconocida.")
 
 # === Descarga imagen satelital en base a un GeoJSON ===
-def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir="downloaded_images"):
+def descargar_imagen_desde_geojson(geojson_obj, res, model_name=None, output_dir="temp/downloaded_images"):
     init_earth_engine()
 
     geometry = extract_geometry(geojson_obj)
@@ -154,7 +154,7 @@ def closest_css3_color_name(rgb_val):
             closest_name = name
     return closest_name
 
-def stack_band_tiffs_to_multiband(band_paths, output_path="downloaded_images/temp_multiband.tif"):
+def stack_band_tiffs_to_multiband(band_paths, output_path="temp/downloaded_images/temp_multiband.tif"):
     band_arrays = []
     meta = None
     for band_file in band_paths:
@@ -472,14 +472,14 @@ def segmentar_con_mkanet(image_path, epochs=5):
 # ===== Modelo de predicción de biodiversidad BS-1.0 =====
 # =========================================================
 
-def run_bs1_model(lon, lat, radius_km=50):
+def run_bs1_model(lon, lat, radius_km=50, taxon="birds"):
     init_earth_engine()
 
-    TAXON = "birds"
+    TAXON = taxon
     MODEL_PATH = f"../model/BS-1.0/models/{TAXON}_model.pkl"
     RESOLUTION = 0.01  # grados (aprox. 1 km)
-    OUTPUT_DIR = "../model/BS-1.0/scripts/output"
-    DATA_DIR = "../cached_layers"
+    OUTPUT_DIR = "../temp/GeoJSON"
+    DATA_DIR = "../temp/cached_layers"
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)

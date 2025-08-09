@@ -17,7 +17,8 @@ MODEL_PATH = f"./model/BS-1.0/models/{TAXON}_model.pkl"
 RESOLUTION = 0.01  # grados (aprox. 1 km)
 REGION_NAME = "chiribiquete"
 OUTPUT_DIR = "./model/BS-1.0/scripts/output"
-DATA_DIR = "./cached_layers"
+OUTPUT_DIR = "./temp/GeoJSON"
+DATA_DIR = "./temp/cached_layers"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
