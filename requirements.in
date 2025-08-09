@@ -13,3 +13,4 @@ torchvision
 rasterio
 scikit-learn
 geopandas
+datasets
