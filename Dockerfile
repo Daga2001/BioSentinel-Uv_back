@@ -40,4 +40,4 @@ COPY . .
 ENV PORT=8000
 
 # Comando de arranque en producción
-CMD ["gunicorn", "biosentinel_uv.wsgi", "--bind", "0.0.0.0:${PORT}"]
+CMD ["sh", "-c", "gunicorn biosentinel_uv.biosentinel_uv.wsgi --bind 0.0.0.0:$PORT"]
