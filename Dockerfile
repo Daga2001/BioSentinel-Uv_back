@@ -25,13 +25,16 @@ RUN apt-get update && apt-get install -y \
        && rm -rf /var/lib/apt/lists/*
 
 # Crear carpeta de la app
-WORKDIR /app/biosentinel_uv/biosentinel_uv
+WORKDIR /app
 
 # Copiar requirements e instalarlos
 COPY requirements.in .
 
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir -r requirements.in
+
+# Copiar el modelo dentro de biosentinel_uv en la imagen
+COPY model biosentinel_uv/model
 
 # Copiar el resto del código
 COPY . .
