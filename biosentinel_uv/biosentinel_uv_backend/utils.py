@@ -477,7 +477,7 @@ def run_bs1_model(lon, lat, radius_km=50, taxon="birds"):
 
     TAXON = taxon
     MODEL_PATH = f"../model/BS-1.0/models/{TAXON}_model.pkl"
-    RESOLUTION = 0.01  # grados (aprox. 1 km)
+    RESOLUTION = 0.0002*radius_km
     OUTPUT_DIR = "../temp/GeoJSON"
     DATA_DIR = "../temp/cached_layers"
 
