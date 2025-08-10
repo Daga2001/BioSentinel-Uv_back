@@ -61,13 +61,32 @@ def _get_sam():
 
 # === Inicializa Earth Engine (solo una vez) ===
 def init_earth_engine():
-    project_id = 'biosentineluv'
     try:
-        ee.Initialize(project=project_id)
-    except Exception:
-        ee.Authenticate()
-        ee.Initialize(project=project_id)
-    print("✅ Earth Engine inicializado correctamente.")
+        # Si tenemos credenciales como variable de entorno (Render)
+        service_account_json = os.getenv("EE_CREDENTIALS_JSON")
+        service_account_email = os.getenv("EE_SERVICE_ACCOUNT")
+
+        if service_account_json and service_account_email:
+            print("🔑 Autenticando con Service Account (modo producción)")
+            credentials = ee.ServiceAccountCredentials(
+                service_account_email,
+                key_data=service_account_json
+            )
+            ee.Initialize(credentials)
+
+        else:
+            print("💻 Autenticando con credenciales locales (modo desarrollo)")
+            project_id = 'biosentineluv'
+            try:
+                ee.Initialize(project=project_id)
+            except Exception:
+                ee.Authenticate()
+                ee.Initialize(project=project_id)
+
+        print("✅ Earth Engine inicializado correctamente")
+
+    except Exception as e:
+        print(f"❌ Error inicializando Earth Engine: {e}")
 
 # === Extrae la geometría desde un objeto GeoJSON ===
 def extract_geometry(geojson_obj):
