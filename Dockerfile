@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
        && rm -rf /var/lib/apt/lists/*
 
 # Crear carpeta de la app
-WORKDIR /app
+WORKDIR /app/biosentinel_uv/biosentinel_uv
 
 # Copiar requirements e instalarlos
 COPY requirements.in .
@@ -40,4 +40,4 @@ COPY . .
 ENV PORT=8000
 
 # Comando de arranque en producción
-CMD ["sh", "-c", "gunicorn biosentinel_uv.biosentinel_uv.wsgi --bind 0.0.0.0:$PORT"]
+CMD ["sh", "-c", "cd ./biosentinel_uv && gunicorn biosentinel_uv.wsgi:application --bind 0.0.0.0:$PORT"]
