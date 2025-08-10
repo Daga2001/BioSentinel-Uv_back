@@ -43,4 +43,4 @@ COPY . .
 ENV PORT=8000
 
 # Comando de arranque en producción
-CMD ["sh", "-c", "cd ./biosentinel_uv && gunicorn biosentinel_uv.wsgi:application --bind 0.0.0.0:$PORT"]
+CMD ["sh", "-c", "cd ./biosentinel_uv && python manage.py runserver 0.0.0.0:$PORT --noreload"]

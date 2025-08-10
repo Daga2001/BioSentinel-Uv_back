@@ -25,8 +25,8 @@ _segment_anything = None
 _PIL = None
 
 # Devuelve número de cores lógicos disponibles
-# num_workers = os.cpu_count()  
-num_workers = 1
+num_workers = os.cpu_count()  
+# num_workers = 1
 
 def _get_torch():
     global _torch
