@@ -4,6 +4,7 @@ import ee
 import geemap
 from datetime import datetime, timedelta
 import base64
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -472,32 +473,37 @@ def segmentar_con_mkanet(image_path, epochs=5):
 # ===== Modelo de predicción de biodiversidad BS-1.0 =====
 # =========================================================
 
-def run_bs1_model(lon, lat, radius_km=50, taxon="birds"):
+def run_bs1_model(bounds, taxon="birds"):
     init_earth_engine()
 
+    lat_span = bounds["north"] - bounds["south"]
+    lon_span = bounds["east"] - bounds["west"]
+    lat_mid = (bounds["north"] + bounds["south"]) / 2
+
+    # Aproximación a kilómetros
+    lat_km = lat_span * 111.32
+    lon_km = lon_span * 111.32 * math.cos(math.radians(lat_mid))
+    steps = 100
+
+    # Definir resolución (steps pasos en el lado más corto)
+    RESOLUTION_M = (min(lat_km, lon_km) * 1000) / steps
+
+    # Convertir a grados según latitud media
+    RESOLUTION_DEG = RESOLUTION_M / (111_320 * math.cos(math.radians(lat_mid)))
+    
     TAXON = taxon
     MODEL_PATH = f"../model/BS-1.0/models/{TAXON}_model.pkl"
-    RESOLUTION = 0.0002*radius_km
     OUTPUT_DIR = "../temp/GeoJSON"
     DATA_DIR = "../temp/cached_layers"
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    def get_bbox_from_point(lon, lat, radius_km=50):
-        deg_radius = radius_km / 111
-        return {
-            "min_lon": lon - deg_radius,
-            "max_lon": lon + deg_radius,
-            "min_lat": lat - deg_radius,
-            "max_lat": lat + deg_radius,
-        }
-
-    def download_layer_if_missing(path, gee_image, band, bbox, scale=1000):
+    def download_layer_if_missing(path, gee_image, band, bounds, scale=RESOLUTION_M):
         if os.path.exists(path):
             print(f"✅ {os.path.basename(path)} ya descargado.")
             return
-        region = ee.Geometry.Rectangle([bbox["min_lon"], bbox["min_lat"], bbox["max_lon"], bbox["max_lat"]])
+        region = ee.Geometry.Rectangle([bounds["west"], bounds["south"], bounds["east"], bounds["north"]])
         image = gee_image.select(band).clip(region)
         print(f"⬇️ Descargando {os.path.basename(path)} desde Google Earth Engine...")
         geemap.ee_export_image(
@@ -509,8 +515,8 @@ def run_bs1_model(lon, lat, radius_km=50, taxon="birds"):
             crs="EPSG:4326"
         )
 
-    def get_gee_layers(bbox):
-        region = ee.Geometry.Rectangle([bbox["min_lon"], bbox["min_lat"], bbox["max_lon"], bbox["max_lat"]])
+    def get_gee_layers(bounds):
+        region = ee.Geometry.Rectangle([bounds["west"], bounds["south"], bounds["east"], bounds["north"]])
         ndvi = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
             .filterDate("2023-01-01", "2023-12-31") \
             .filterBounds(region) \
@@ -527,9 +533,9 @@ def run_bs1_model(lon, lat, radius_km=50, taxon="birds"):
             .rename('DEM')
         return ndvi, lst, dem
 
-    def generate_grid(bbox, resolution=RESOLUTION):
-        lon_vals = np.arange(bbox["min_lon"], bbox["max_lon"], resolution)
-        lat_vals = np.arange(bbox["min_lat"], bbox["max_lat"], resolution)
+    def generate_grid(bounds, resolution=RESOLUTION_DEG):
+        lon_vals = np.arange(bounds["west"], bounds["east"], resolution)
+        lat_vals = np.arange(bounds["south"], bounds["north"], resolution)
         return [(lon, lat) for lon in lon_vals for lat in lat_vals]
 
     def extract_raster_values(points, raster_path):
@@ -550,19 +556,18 @@ def run_bs1_model(lon, lat, radius_km=50, taxon="birds"):
         return output_path
 
     # Main logic
-    bbox = get_bbox_from_point(lon, lat, radius_km)
-    region_name = f"loc_{lon}_{lat}_{radius_km}km".replace('.', '_').replace('-', 'm')
+    region_name = f"bounds_{bounds['west']}_{bounds['south']}_{bounds['east']}_{bounds['north']}".replace('.', '_').replace('-', 'm')
     ndvi_path = f"{DATA_DIR}/{region_name}_NDVI.tif"
     lst_path = f"{DATA_DIR}/{region_name}_LST.tif"
     dem_path = f"{DATA_DIR}/{region_name}_DEM.tif"
     output_geojson = f"{OUTPUT_DIR}/{region_name}_predictions.geojson"
 
-    ndvi_img, lst_img, dem_img = get_gee_layers(bbox)
-    download_layer_if_missing(ndvi_path, ndvi_img, "NDVI", bbox)
-    download_layer_if_missing(lst_path, lst_img, "LST", bbox)
-    download_layer_if_missing(dem_path, dem_img, "DEM", bbox)
+    ndvi_img, lst_img, dem_img = get_gee_layers(bounds)
+    download_layer_if_missing(ndvi_path, ndvi_img, "NDVI", bounds)
+    download_layer_if_missing(lst_path, lst_img, "LST", bounds)
+    download_layer_if_missing(dem_path, dem_img, "DEM", bounds)
 
-    points = generate_grid(bbox)
+    points = generate_grid(bounds)
     ndvi = extract_raster_values(points, ndvi_path)
     lst = extract_raster_values(points, lst_path)
     dem = extract_raster_values(points, dem_path)

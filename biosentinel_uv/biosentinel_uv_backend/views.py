@@ -187,15 +187,8 @@ def generar_segmentacion_bs10(request):
     data = request.data
     model = data.get("model")
     taxon  = data.get("taxon")
-    lon = data.get("longitude")
-    lat = data.get("latitude")
-    radius_km = data.get("radius_km", 50)
-    if lon is None or lat is None:
-        return Response({
-            "success": False,
-            "message": "Se requiere 'longitude' y 'latitude' en el body para el modelo bs1.0."
-        }, status=status.HTTP_400_BAD_REQUEST)
-    geojson_path = utils.run_bs1_model(lon, lat, radius_km, taxon)
+    bounds = data.get("bounds")
+    geojson_path = utils.run_bs1_model(bounds, taxon)
     # Obtiene el archivo GeoJSON directamente
     with open(geojson_path, "r", encoding="utf-8") as f:
         geojson_content = f.read()
