@@ -3,6 +3,7 @@ import glob
 import ee
 import geemap
 from datetime import datetime, timedelta
+from scipy.ndimage import gaussian_filter
 import base64
 import math
 import numpy as np
@@ -21,6 +22,7 @@ import geopandas as gpd
 import pandas as pd
 from joblib import load
 from shapely.geometry import Point
+import matplotlib.pyplot as plt
 
 # === Inicializa Earth Engine (solo una vez) ===
 def init_earth_engine():
@@ -200,7 +202,7 @@ def segmentar_con_segformer_b0(image_path):
     rgb_image = Image.fromarray(rgb_array)
 
     # 💾 Guardar imagen segmentada
-    output_dir = "/tmp/segmentaciones"
+    output_dir = "../temp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"segmentacion_{uuid.uuid4().hex[:8]}.png"
     output_path = os.path.join(output_dir, output_filename)
@@ -282,7 +284,7 @@ def segmentar_con_clipseg_sam(image_path):
     rgb_image = Image.fromarray(rgb_array)
 
     # Guardar imagen segmentada
-    output_dir = "/tmp/segmentaciones"
+    output_dir = "../temp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"segmentacion_clipseg_sam_{uuid.uuid4().hex[:8]}.png"
     output_path = os.path.join(output_dir, output_filename)
@@ -342,7 +344,7 @@ def segmentar_con_kmeans(image_path, k=6):
     rgb_image = Image.fromarray(rgb_classes)
 
     # Guardar imagen segmentada
-    output_dir = "/tmp/segmentaciones"
+    output_dir = "../temp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"segmentacion_kmeans_{uuid.uuid4().hex[:8]}.png"
     output_path = os.path.join(output_dir, output_filename)
@@ -446,7 +448,7 @@ def segmentar_con_mkanet(image_path, epochs=5):
     rgb_image = Image.fromarray(rgb_classes)
 
     # Guardar imagen segmentada
-    output_dir = "/tmp/segmentaciones"
+    output_dir = "../temp/segmentaciones"
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"segmentacion_mkanet_{uuid.uuid4().hex[:8]}.png"
     output_path = os.path.join(output_dir, output_filename)
@@ -493,8 +495,9 @@ def run_bs1_model(bounds, taxon="birds"):
     
     TAXON = taxon
     MODEL_PATH = f"../model/BS-1.0/models/{TAXON}_model.pkl"
-    OUTPUT_DIR = "../temp/GeoJSON"
+    OUTPUT_DIR = "../temp/PNGs"
     DATA_DIR = "../temp/cached_layers"
+    
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -520,40 +523,42 @@ def run_bs1_model(bounds, taxon="birds"):
             bounds["west"], bounds["south"], bounds["east"], bounds["north"]
         ])
 
-        ndvi = (
-            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterBounds(region)
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))  # Máx 20% nubes
-            .sort('system:time_start', False)  # Ordenar de más nuevo a más viejo
-            .first()
-            .normalizedDifference(['B8', 'B4'])
-            .rename('NDVI')
-        )
+        # Fecha actual
+        today = datetime.utcnow()
+        six_months_ago = today - timedelta(days=182)  # aprox. 6 meses
 
-        lst = (
-            ee.ImageCollection("MODIS/061/MOD11A2")
-            .filterBounds(region)
-            .sort('system:time_start', False)
-            .first()
-            .select("LST_Day_1km")
-            .multiply(0.02).subtract(273.15)
-            .rename("LST")
-        )
+        start_date = six_months_ago.strftime("%Y-%m-%d")
+        end_date = today.strftime("%Y-%m-%d")
 
-        dem = (
-            ee.ImageCollection("COPERNICUS/DEM/GLO30")
-            .mosaic()
-            .select('DEM')
+        ndvi = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+            .filterDate(start_date, end_date) \
+            .filterBounds(region) \
+            .median() \
+            .normalizedDifference(['B8', 'B4']).rename('NDVI')
+
+        lst = ee.ImageCollection("MODIS/061/MOD11A2") \
+            .filterDate(start_date, end_date) \
+            .filterBounds(region) \
+            .select("LST_Day_1km") \
+            .mean() \
+            .multiply(0.02).subtract(273.15).rename("LST")
+
+        dem = ee.ImageCollection("COPERNICUS/DEM/GLO30") \
+            .mosaic() \
+            .select('DEM') \
             .rename('DEM')
-        )
 
         return ndvi, lst, dem
 
 
-    def generate_grid(bounds, resolution=RESOLUTION_DEG):
-        lon_vals = np.arange(bounds["west"], bounds["east"], resolution)
-        lat_vals = np.arange(bounds["south"], bounds["north"], resolution)
-        return [(lon, lat) for lon in lon_vals for lat in lat_vals]
+    def generate_grid(bounds, steps=100):
+        lon_vals = np.linspace(bounds["west"], bounds["east"], steps)
+        lat_vals = np.linspace(bounds["north"], bounds["south"], steps)  # De norte a sur
+        width = len(lon_vals)
+        height = len(lat_vals)
+        points = [(lon, lat) for lat in lat_vals for lon in lon_vals]
+        return width, height, points
+
 
     def extract_raster_values(points, raster_path):
         if not os.path.exists(raster_path):
@@ -562,22 +567,11 @@ def run_bs1_model(bounds, taxon="birds"):
             values = list(src.sample(points))
             return np.array(values).squeeze()
 
-    def build_geojson(points, predictions_df, output_path):
-        gdf = gpd.GeoDataFrame(
-            predictions_df,
-            geometry=[Point(xy) for xy in points],
-            crs="EPSG:4326"
-        )
-        gdf.to_file(output_path, driver="GeoJSON")
-        print(f"📍 GeoJSON guardado en: {output_path}")
-        return output_path
-
     # Main logic
     region_name = f"bounds_{bounds['west']}_{bounds['south']}_{bounds['east']}_{bounds['north']}".replace('.', '_').replace('-', 'm')
     ndvi_path = f"{DATA_DIR}/{region_name}_NDVI.tif"
     lst_path = f"{DATA_DIR}/{region_name}_LST.tif"
     dem_path = f"{DATA_DIR}/{region_name}_DEM.tif"
-    output_geojson = f"{OUTPUT_DIR}/{region_name}_predictions.geojson"
 
     ndvi_img, lst_img, dem_img = get_gee_layers(bounds)
     download_layer_if_missing(ndvi_path, ndvi_img, "NDVI", bounds, scale=RESOLUTION_M)
@@ -585,7 +579,7 @@ def run_bs1_model(bounds, taxon="birds"):
     download_layer_if_missing(dem_path, dem_img, "DEM", bounds, scale=RESOLUTION_M)
 
 
-    points = generate_grid(bounds)
+    width, height, points = generate_grid(bounds)
     ndvi = extract_raster_values(points, ndvi_path)
     lst = extract_raster_values(points, lst_path)
     dem = extract_raster_values(points, dem_path)
@@ -600,7 +594,45 @@ def run_bs1_model(bounds, taxon="birds"):
 
     model = load(MODEL_PATH)
     y_pred = model.predict(df[["NDVI", "LST_C", "DEM", "longitude", "latitude"]])
-    df[["Biota_Overlap", "Rel_Occupancy", "Rel_Species_Richness"]] = y_pred
+    
+    # Extraer y reshape para cada métrica
+    richness_map = y_pred[:, 0].reshape((height, width))
+    occupancy_map = y_pred[:, 1].reshape((height, width))
+    overlap_map = y_pred[:, 2].reshape((height, width))
 
-    geojson_path = build_geojson(points, df, output_geojson)
-    return geojson_path
+    def apply_colormap(array, cmap_name="bwr"):
+        cmap = plt.get_cmap(cmap_name)
+        colored = cmap(array)  # valores entre 0 y 1 → RGBA
+        rgb = (colored[:, :, :3] * 255).astype(np.uint8)  # quitar canal alfa y convertir a 0–255
+        return rgb
+
+    def normalize_to_01(array):
+        min_val, max_val = array.min(), array.max()
+        if max_val - min_val == 0:
+            return np.zeros_like(array, dtype=np.float32)
+        return (array - min_val) / (max_val - min_val)
+    
+    richness_smooth = gaussian_filter(richness_map, sigma=1)
+    occupancy_smooth = gaussian_filter(occupancy_map, sigma=1)
+    overlap_smooth = gaussian_filter(overlap_map, sigma=1)
+
+    # Normalizar y aplicar colormap
+    richness_rgb = apply_colormap(normalize_to_01(richness_smooth), cmap_name="bwr")
+    occupancy_rgb = apply_colormap(normalize_to_01(occupancy_smooth), cmap_name="bwr")
+    overlap_rgb = apply_colormap(normalize_to_01(overlap_smooth), cmap_name="bwr")
+    
+    # Rutas para guardar
+    richness_path = f"{OUTPUT_DIR}/{region_name}_richness_predictions.png"
+    occupancy_path = f"{OUTPUT_DIR}/{region_name}_occupancy_predictions.png"
+    overlap_path = f"{OUTPUT_DIR}/{region_name}_overlap_predictions.png"
+
+    # Guardar
+    Image.fromarray(richness_rgb).save(richness_path)
+    Image.fromarray(occupancy_rgb).save(occupancy_path)
+    Image.fromarray(overlap_rgb).save(overlap_path)
+
+    return {
+        "richness_path": richness_path,
+        "occupancy_path": occupancy_path,
+        "overlap_path": overlap_path,
+    }

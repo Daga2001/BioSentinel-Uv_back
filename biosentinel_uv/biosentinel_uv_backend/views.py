@@ -186,14 +186,41 @@ def generar_segmentacion(request):
 def generar_segmentacion_bs10(request):
     data = request.data
     model = data.get("model")
-    taxon  = data.get("taxon")
+    taxon = data.get("taxon")
     bounds = data.get("bounds")
-    geojson_path = utils.run_bs1_model(bounds, taxon)
-    # Obtiene el archivo GeoJSON directamente
-    with open(geojson_path, "r", encoding="utf-8") as f:
-        geojson_content = f.read()
+
+    start_time = time.time()
+
+    try:
+        image_paths = utils.run_bs1_model(bounds, taxon)
+    except Exception as e:
+        return Response({
+            "success": False,
+            "message": f"Error al generar modelo BS1: {str(e)}"
+        }, status=500)
+
+    def encode_image_to_base64(path):
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode('utf-8')
+
+    richness_b64 = encode_image_to_base64(image_paths["richness_path"])
+    occupancy_b64 = encode_image_to_base64(image_paths["occupancy_path"])
+    overlap_b64 = encode_image_to_base64(image_paths["overlap_path"])
+
+    processing_time_ms = int((time.time() - start_time) * 1000)
+    timestamp_iso = timezone.now().isoformat().replace("+00:00", "Z")
+
     return Response({
         "success": True,
         "model": model,
-        "geojson": geojson_content
-    }, status=status.HTTP_200_OK)
+        "images": {
+            "richness": richness_b64,
+            "occupancy": occupancy_b64,
+            "overlap": overlap_b64,
+        },
+        "metadata": {
+            "bounds": bounds,
+            "processingTime": processing_time_ms,
+            "timestamp": timestamp_iso
+        }
+    }, status=200)
