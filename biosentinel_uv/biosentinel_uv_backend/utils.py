@@ -505,7 +505,7 @@ def run_bs1_model(bounds, taxon="birds"):
             return
         region = ee.Geometry.Rectangle([bounds["west"], bounds["south"], bounds["east"], bounds["north"]])
         image = gee_image.select(band).clip(region)
-        print(f"⬇️ Descargando {os.path.basename(path)} desde Google Earth Engine...")
+        print(f"⬇️ Descargando {os.path.basename(path)} desde Google Earth Engine... con resolucion de {RESOLUTION_M} meters")
         geemap.ee_export_image(
             image,
             filename=path,
@@ -516,22 +516,39 @@ def run_bs1_model(bounds, taxon="birds"):
         )
 
     def get_gee_layers(bounds):
-        region = ee.Geometry.Rectangle([bounds["west"], bounds["south"], bounds["east"], bounds["north"]])
-        ndvi = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
-            .filterDate("2023-01-01", "2023-12-31") \
-            .filterBounds(region) \
-            .median() \
-            .normalizedDifference(['B8', 'B4']).rename('NDVI')
-        lst = ee.ImageCollection("MODIS/061/MOD11A2") \
-            .filterDate("2023-01-01", "2023-12-31") \
-            .select("LST_Day_1km") \
-            .mean() \
-            .multiply(0.02).subtract(273.15).rename("LST")
-        dem = ee.ImageCollection("COPERNICUS/DEM/GLO30") \
-            .mosaic() \
-            .select('DEM') \
+        region = ee.Geometry.Rectangle([
+            bounds["west"], bounds["south"], bounds["east"], bounds["north"]
+        ])
+
+        ndvi = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(region)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))  # Máx 20% nubes
+            .sort('system:time_start', False)  # Ordenar de más nuevo a más viejo
+            .first()
+            .normalizedDifference(['B8', 'B4'])
+            .rename('NDVI')
+        )
+
+        lst = (
+            ee.ImageCollection("MODIS/061/MOD11A2")
+            .filterBounds(region)
+            .sort('system:time_start', False)
+            .first()
+            .select("LST_Day_1km")
+            .multiply(0.02).subtract(273.15)
+            .rename("LST")
+        )
+
+        dem = (
+            ee.ImageCollection("COPERNICUS/DEM/GLO30")
+            .mosaic()
+            .select('DEM')
             .rename('DEM')
+        )
+
         return ndvi, lst, dem
+
 
     def generate_grid(bounds, resolution=RESOLUTION_DEG):
         lon_vals = np.arange(bounds["west"], bounds["east"], resolution)
@@ -563,9 +580,10 @@ def run_bs1_model(bounds, taxon="birds"):
     output_geojson = f"{OUTPUT_DIR}/{region_name}_predictions.geojson"
 
     ndvi_img, lst_img, dem_img = get_gee_layers(bounds)
-    download_layer_if_missing(ndvi_path, ndvi_img, "NDVI", bounds)
-    download_layer_if_missing(lst_path, lst_img, "LST", bounds)
-    download_layer_if_missing(dem_path, dem_img, "DEM", bounds)
+    download_layer_if_missing(ndvi_path, ndvi_img, "NDVI", bounds, scale=RESOLUTION_M)
+    download_layer_if_missing(lst_path, lst_img, "LST", bounds, scale=RESOLUTION_M)
+    download_layer_if_missing(dem_path, dem_img, "DEM", bounds, scale=RESOLUTION_M)
+
 
     points = generate_grid(bounds)
     ndvi = extract_raster_values(points, ndvi_path)
